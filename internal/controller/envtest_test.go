@@ -132,7 +132,7 @@ func startEnv(t *testing.T, o envOptions) *env {
 	must(NewGatewayClassReconciler(c, cfg, cf).SetupWithManager(mgr))
 	must(NewGatewayReconciler(c, scheme, cfg, cf, AllFeatures(), rec, "cluster-uid").SetupWithManager(mgr, nil))
 	if !o.noIngressService {
-		setupSources(t, mgr, c, scheme, cfg, rec)
+		setupSources(t, mgr, c, scheme, cfg, cf, rec)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
