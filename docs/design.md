@@ -267,10 +267,12 @@ generated Gateways are named after Services and Ingresses):
 - `cloudflared tunnel run` with the configured image; the token Secret as
   environment, `NO_AUTOUPDATE=true`, metrics on `0.0.0.0:2000`, and the log
   level.
-- Startup probe (about 50 seconds) and liveness probe (every 10 seconds, 3
-  failures) on `/ready` on the metrics port.
+- Startup probe (about 50 seconds), liveness probe (every 10 seconds, 3
+  failures) and readiness probe on `/ready` on the metrics port, which
+  answers once the connector holds a connection to Cloudflare's edge.
 - Non-root with UID 65532, no privilege escalation, all capabilities
-  dropped, `RuntimeDefault` seccomp, and the safe sysctl
+  dropped, a read-only root filesystem, no service account token,
+  `RuntimeDefault` seccomp, and the safe sysctl
   `net.ipv4.ping_group_range` so `cloudflared` can open ICMP sockets. The
   pods meet the `restricted` Pod Security Standard.
 - Required node affinity to Linux on amd64 or arm64, a topology spread over
