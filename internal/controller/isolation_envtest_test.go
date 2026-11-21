@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -147,6 +148,86 @@ func TestEnvtestHostnameStaysWithFirstPublisher(t *testing.T) {
 	}
 	if r := e.record("CNAME", "app.example.com"); r == nil || r.Content != target {
 		t.Errorf("CNAME = %+v, want %s", r, target)
+	}
+
+	// A restarted controller knows the same from the signed annotations.
+	fresh := NewGatewayReconciler(e.c, e.scheme, e.cfg, nil, AllFeatures(), nil, "cluster-uid")
+	for _, c := range []struct {
+		gw, claimant string
+	}{{"a/old", "b/new"}, {"b/new", ""}} {
+		ns, name, _ := strings.Cut(c.gw, "/")
+		g := &gwv1.Gateway{}
+		if err := e.get(ns, name, g); err != nil {
+			t.Fatal(err)
+		}
+		claims, err := fresh.claimedHostnames(e.ctx, g)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := claims["app.example.com"].Gateway; got != c.claimant {
+			t.Errorf("after a restart, %s sees app.example.com claimed by %q, want %q", c.gw, got, c.claimant)
+		}
+	}
+}
+
+// A hand-written hostnames annotation claims nothing, even on an accepted
+// Gateway whose provisioning never gets to rewrite it.
+func TestEnvtestForgedHostnamesClaimNothing(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("x"), namespace("y"), backendService("y", "web", 80),
+		// Squatting the token Secret's name keeps x's provisioning pending.
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "x", Name: "x-cloudflared-token"}})
+	x := httpGateway("x", "x")
+	x.Annotations = map[string]string{config.AnnotationHostnames: `{"app.example.com":["HTTPRoute x/r"]}`}
+	e.create(x)
+	e.eventually("x accepted but not programmed", func() error {
+		g := &gwv1.Gateway{}
+		if err := e.get("x", "x", g); err != nil {
+			return err
+		}
+		if err := condIs(g.Status.Conditions, "Accepted", metav1.ConditionTrue); err != nil {
+			return err
+		}
+		return condIs(g.Status.Conditions, "Programmed", metav1.ConditionFalse)
+	})
+	e.create(httpGateway("y", "y"), httpRoute("y", "app", "y", "app.example.com", "web", 80))
+	e.markReady("y", "y")
+	e.eventually("y publishes", e.routeParentCond("y", "app", "DNSRecordsReady", metav1.ConditionTrue))
+}
+
+// A namespace allowed to bind tunnels still cannot get another Gateway's
+// tunnel deleted.
+func TestEnvtestTunnelIDCannotDeleteOthersTunnel(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("victim"), httpGateway("victim", "gw"))
+	var id string
+	e.eventually("victim tunnel", func() error {
+		g := &gwv1.Gateway{}
+		if err := e.get("victim", "gw", g); err != nil {
+			return err
+		}
+		if id = g.Annotations[config.AnnotationTunnel]; id == "" {
+			return fmt.Errorf("no tunnel yet")
+		}
+		return nil
+	})
+	ns := namespace("attacker")
+	ns.Annotations = map[string]string{config.AnnotationAllowTunnelID: "true"}
+	gw := httpGateway("attacker", "gw")
+	gw.Annotations = map[string]string{config.AnnotationTunnelID: id, config.AnnotationTunnel: id}
+	e.create(ns, gw)
+	e.eventually("binding refused", e.gatewayCond("attacker", "gw", "Accepted", metav1.ConditionFalse))
+	if err := e.c.Delete(e.ctx, gw); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("attacker gone", func() error {
+		if err := e.get("attacker", "gw", &gwv1.Gateway{}); !apierrors.IsNotFound(err) {
+			return fmt.Errorf("still there: %v", err)
+		}
+		return nil
+	})
+	if !e.tunnelExists(id) {
+		t.Error("another Gateway's tunnel was deleted")
 	}
 }
 

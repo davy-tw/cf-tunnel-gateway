@@ -40,6 +40,9 @@ const (
 	AnnotationHostnames      = Domain + "/hostnames"
 	AnnotationGRPCNotified   = Domain + "/grpc-notified"
 	AnnotationDNSHostnames   = Domain + "/dns-hostnames"
+	// AnnotationSignature authenticates the annotations above that the
+	// controller trusts (see the controller's signature.go).
+	AnnotationSignature = Domain + "/signature"
 
 	// Ingress and Service annotations.
 	AnnotationGateway         = Domain + "/gateway"

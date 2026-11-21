@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -61,10 +62,7 @@ type GatewayReconciler struct {
 	mu      sync.Mutex
 	configs map[string]configEntry // tunnel ID -> last written configuration
 	tokens  map[string]tokenEntry  // tunnel ID -> connector token
-	// published holds the hostnames each Gateway last published, as
-	// written by this process (unlike the hostnames annotation, which
-	// the Gateway's author can edit).
-	published map[types.UID]map[string]bool
+	signer  annotationSigner
 }
 
 type configEntry struct {
@@ -77,7 +75,7 @@ func NewGatewayReconciler(c client.Client, scheme *runtime.Scheme, cfg *config.C
 	return &GatewayReconciler{
 		classResolver: classResolver{Client: c, Config: cfg, CF: cf},
 		Scheme:        scheme, Features: f, Recorder: rec, ClusterID: clusterID,
-		configs: map[string]configEntry{}, tokens: map[string]tokenEntry{}, published: map[types.UID]map[string]bool{},
+		configs: map[string]configEntry{}, tokens: map[string]tokenEntry{},
 	}
 }
 
@@ -256,6 +254,7 @@ func ignoreRateLimit(err error) error {
 var controllerAnnotations = []string{
 	config.AnnotationTunnel, config.AnnotationPreviousTunnel, config.AnnotationTokenSecret,
 	config.AnnotationHostnames, config.AnnotationDNSHostnames, config.AnnotationGRPCNotified,
+	config.AnnotationSignature,
 }
 
 // routeSet holds every route in the cluster, by kind.
@@ -396,40 +395,58 @@ func needsNamespaceLabels(gw *gwv1.Gateway) bool {
 	return false
 }
 
-// unpublish forgets the hostnames of a Gateway that publishes nothing,
-// so that they are no longer claimed.
+// unpublish drops the hostnames of a Gateway that publishes nothing, so
+// that they are no longer claimed.
 func (r *GatewayReconciler) unpublish(ctx context.Context, gw *gwv1.Gateway) error {
-	r.setPublished(gw, nil)
 	return r.setAnnotations(ctx, gw, map[string]string{config.AnnotationHostnames: ""})
 }
 
-func (r *GatewayReconciler) setPublished(gw *gwv1.Gateway, hosts []translate.Hostname) {
-	set := map[string]bool{}
-	for _, h := range hosts {
-		set[h.Name] = true
+// signedHostnames returns the hostnames gw publishes, from its hostnames
+// annotation when its signature matches.
+func (r *GatewayReconciler) signedHostnames(ctx context.Context, gw *gwv1.Gateway) (map[string][]string, error) {
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return nil, err
 	}
-	r.mu.Lock()
-	r.published[gw.UID] = set
-	r.mu.Unlock()
+	return parseHostnames(rec[config.AnnotationHostnames]), nil
 }
 
-func (r *GatewayReconciler) publishes(gw *gwv1.Gateway, host string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.published[gw.UID][host]
+// publishedElsewhere maps the other Gateways ("namespace/name") to the
+// hostnames they publish and the routes that publish them, from their
+// signed hostnames annotations.
+func (r *GatewayReconciler) publishedElsewhere(ctx context.Context, gw *gwv1.Gateway) (map[string]map[string][]string, error) {
+	var list gwv1.GatewayList
+	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	out := map[string]map[string][]string{}
+	for i := range list.Items {
+		other := &list.Items[i]
+		if other.UID == gw.UID || other.Annotations[config.AnnotationHostnames] == "" {
+			continue
+		}
+		hosts, err := r.signedHostnames(ctx, other)
+		if err != nil {
+			return nil, err
+		}
+		out[gatewayKey(other)] = hosts
+	}
+	return out, nil
 }
 
 // claimedHostnames returns the hostnames other managed Gateways publish,
-// from their hostnames annotations. The Gateway that publishes a
+// from their signed hostnames annotations. The Gateway that publishes a
 // hostname first keeps it: another Gateway's claim counts unless this
-// Gateway already publishes the hostname and is the older of the two
-// (which settles two Gateways that started publishing at once). Only
-// Gateways this controller accepted count, and whether this Gateway
-// publishes a hostname comes from what this process wrote, not from the
-// editable annotation.
+// Gateway publishes the hostname too and is the older of the two (which
+// settles two Gateways that started publishing at once). Only accepted
+// Gateways count.
 func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gateway) (map[string]translate.Claim, error) {
 	var list gwv1.GatewayList
 	if err := r.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	own, err := r.signedHostnames(ctx, gw)
+	if err != nil {
 		return nil, err
 	}
 	claimed := map[string]translate.Claim{}
@@ -437,12 +454,15 @@ func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gatew
 	sort.Slice(list.Items, func(i, j int) bool { return olderGateway(&list.Items[i], &list.Items[j]) })
 	for i := range list.Items {
 		other := &list.Items[i]
-		if other.UID == gw.UID || !other.DeletionTimestamp.IsZero() ||
-			!conditionTrue(other.Status.Conditions, string(gwv1.GatewayConditionAccepted), other.Generation) {
+		if other.UID == gw.UID || !other.DeletionTimestamp.IsZero() {
 			continue
 		}
-		raw := other.Annotations[config.AnnotationHostnames]
-		if raw == "" {
+		// Accepted at any generation: right after a spec edit the claim
+		// still stands until the Gateway's own reconcile says otherwise.
+		if c := meta.FindStatusCondition(other.Status.Conditions, string(gwv1.GatewayConditionAccepted)); c == nil || c.Status != metav1.ConditionTrue {
+			continue
+		}
+		if other.Annotations[config.AnnotationHostnames] == "" {
 			continue
 		}
 		cls := string(other.Spec.GatewayClassName)
@@ -458,8 +478,15 @@ func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gatew
 		if !managed {
 			continue
 		}
-		for host, routes := range parseHostnames(raw) {
-			if _, taken := claimed[host]; taken || olderGateway(gw, other) && r.publishes(gw, host) {
+		hosts, err := r.signedHostnames(ctx, other)
+		if err != nil {
+			return nil, err
+		}
+		for host, routes := range hosts {
+			if _, mine := own[host]; mine && olderGateway(gw, other) {
+				continue
+			}
+			if _, taken := claimed[host]; taken {
 				continue
 			}
 			c := translate.Claim{Gateway: other.Namespace + "/" + other.Name}
@@ -601,7 +628,11 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 	recorded := splitList(gw.Annotations[config.AnnotationDNSHostnames])
 	dnsHosts := recorded
 	if out.dnsManaged {
-		s := &dnsSyncer{CF: r.CF, Config: r.Config, Token: creds.DNSToken, Gateway: gatewayKey(gw), Target: target}
+		claims, err := r.publishedElsewhere(ctx, gw)
+		if err != nil {
+			return err
+		}
+		s := &dnsSyncer{CF: r.CF, Config: r.Config, Token: creds.DNSToken, Gateway: gatewayKey(gw), Target: target, Published: claims}
 		out.dns, dnsHosts, out.dnsErr = s.Sync(ctx, res.Hostnames, recorded)
 		if out.dns == nil {
 			return out.dnsErr // rate limited
@@ -619,7 +650,6 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 		return err
 	}
 
-	r.setPublished(gw, res.Hostnames)
 	ann := map[string]string{
 		config.AnnotationTunnel:       tun.ID,
 		config.AnnotationTokenSecret:  connector.SecretName(gw.Name),
@@ -681,28 +711,52 @@ func splitList(s string) []string {
 	return out
 }
 
-// setAnnotations patches controller annotations; "" removes one.
+// setAnnotations patches controller annotations; "" removes one. The
+// signed annotations are signed again; those not being set keep their
+// value only if their signature matched, so that signing never vouches
+// for a hand-written value.
 func (r *GatewayReconciler) setAnnotations(ctx context.Context, gw *gwv1.Gateway, ann map[string]string) error {
-	changed := false
-	for k, v := range ann {
-		if gw.Annotations[k] != v {
-			changed = true
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return err
+	}
+	merged := map[string]string{}
+	for k, v := range gw.Annotations {
+		merged[k] = v
+	}
+	for _, k := range signedAnnotations {
+		if _, set := ann[k]; !set {
+			if v := rec[k]; v != "" {
+				merged[k] = v
+			} else {
+				delete(merged, k)
+			}
 		}
-	}
-	if !changed {
-		return nil
-	}
-	orig := gw.DeepCopy()
-	if gw.Annotations == nil {
-		gw.Annotations = map[string]string{}
 	}
 	for k, v := range ann {
 		if v == "" {
-			delete(gw.Annotations, k)
+			delete(merged, k)
 		} else {
-			gw.Annotations[k] = v
+			merged[k] = v
 		}
 	}
+	signed := false
+	for _, k := range signedAnnotations {
+		signed = signed || merged[k] != ""
+	}
+	delete(merged, config.AnnotationSignature)
+	if signed {
+		key, err := r.signingKey(ctx)
+		if err != nil {
+			return err
+		}
+		merged[config.AnnotationSignature] = signAnnotations(key, gw.UID, merged)
+	}
+	if maps.Equal(merged, gw.Annotations) || len(merged) == 0 && len(gw.Annotations) == 0 {
+		return nil
+	}
+	orig := gw.DeepCopy()
+	gw.Annotations = merged
 	return r.Patch(ctx, gw, client.MergeFromWithOptions(orig, client.MergeFromWithOptimisticLock{}))
 }
 
@@ -796,7 +850,6 @@ func (r *GatewayReconciler) programmed(out *outcome) bool {
 // when the Gateway moved to another controller's class: its Kubernetes
 // objects are deleted too, since owner references keep them otherwise.
 func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unmanage bool) (bool, error) {
-	r.setPublished(gw, nil)
 	if err := r.writeFinalizingStatus(ctx, gw); err != nil {
 		return false, err
 	}
@@ -828,7 +881,15 @@ func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unma
 }
 
 func (r *GatewayReconciler) cleanupCloudflare(ctx context.Context, gw *gwv1.Gateway) error {
-	tunnels := splitList(gw.Annotations[config.AnnotationTunnel] + "," + gw.Annotations[config.AnnotationPreviousTunnel])
+	// Only tunnel IDs the controller recorded (signed) are candidates; the
+	// Gateway's own tunnel is also found by name below. DNS records are
+	// checked against their ownership TXT record, so the list of names to
+	// look at may come from the plain annotation.
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return err
+	}
+	tunnels := splitList(rec[config.AnnotationTunnel] + "," + rec[config.AnnotationPreviousTunnel])
 	dnsHosts := splitList(gw.Annotations[config.AnnotationDNSHostnames])
 	creds, err := r.gatewayCredentials(ctx, gw)
 	var ip *invalidParamsError

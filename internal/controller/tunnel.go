@@ -48,9 +48,13 @@ func (r *GatewayReconciler) getTunnel(ctx context.Context, creds *Credentials, i
 // ensureTunnel returns the Gateway's tunnel, creating it if needed, and
 // the tunnel being replaced, if any.
 func (r *GatewayReconciler) ensureTunnel(ctx context.Context, gw *gwv1.Gateway, creds *Credentials) (*cloudflare.Tunnel, string, error) {
-	recorded := gw.Annotations[config.AnnotationTunnel]
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return nil, "", err
+	}
+	recorded := rec[config.AnnotationTunnel]
 	bound := gw.Annotations[config.AnnotationTunnelID]
-	previous := gw.Annotations[config.AnnotationPreviousTunnel]
+	previous := rec[config.AnnotationPreviousTunnel]
 	replace := func(current string) (string, error) {
 		// current is being replaced; a tunnel replaced earlier that is
 		// still around is released now.
@@ -144,13 +148,17 @@ func (r *GatewayReconciler) boundElsewhere(ctx context.Context, gw *gwv1.Gateway
 	if err := r.List(ctx, &list); err != nil {
 		return "", err
 	}
-	for _, other := range list.Items {
+	for i := range list.Items {
+		other := &list.Items[i]
 		if other.UID == gw.UID {
 			continue
 		}
-		a := other.Annotations
-		if a[config.AnnotationTunnel] == id || a[config.AnnotationPreviousTunnel] == id ||
-			a[config.AnnotationTunnelID] == id && olderGateway(&other, gw) {
+		rec, err := r.recorded(ctx, other)
+		if err != nil {
+			return "", err
+		}
+		if rec[config.AnnotationTunnel] == id || rec[config.AnnotationPreviousTunnel] == id ||
+			other.Annotations[config.AnnotationTunnelID] == id && olderGateway(other, gw) {
 			return other.Namespace + "/" + other.Name, nil
 		}
 	}
@@ -246,16 +254,19 @@ func (r *GatewayReconciler) deleteTunnel(ctx context.Context, gw *gwv1.Gateway, 
 	return nil
 }
 
-// ownsTunnel reports whether t was created for gw, or is bound to it with
-// an allowed tunnel-id annotation.
+// ownsTunnel reports whether t was created for gw, or the controller
+// recorded it as gw's tunnel (after binding it with an allowed
+// tunnel-id), as shown by the signed tunnel and previous-tunnel
+// annotations.
 func (r *GatewayReconciler) ownsTunnel(ctx context.Context, gw *gwv1.Gateway, t *cloudflare.Tunnel) (bool, error) {
 	if t.Name == r.tunnelName(gw) {
 		return true, nil
 	}
-	if gw.Annotations[config.AnnotationTunnelID] != t.ID {
-		return false, nil
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return false, err
 	}
-	return r.bindingAllowed(ctx, gw)
+	return t.ID == rec[config.AnnotationTunnel] || t.ID == rec[config.AnnotationPreviousTunnel], nil
 }
 
 // bindingAllowed reports whether gw's namespace may bind existing tunnels.

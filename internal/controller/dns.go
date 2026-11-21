@@ -24,6 +24,29 @@ type dnsSyncer struct {
 	Gateway string
 	// Target is the tunnel the records point at.
 	Target string
+	// Published maps other Gateways to the hostnames they publish and the
+	// routes ("<kind> <namespace>/<name>") that publish them.
+	Published map[string]map[string][]string
+}
+
+// mayTakeOver reports whether this Gateway may take over h's records from
+// Gateway owner: a switching route names this Gateway as the new owner,
+// is attached to the owner too, and every route the owner publishes h
+// for is published here as well (one source moving all of its routes).
+func (s *dnsSyncer) mayTakeOver(h translate.Hostname, owner string) bool {
+	if h.DNSParent != s.Gateway || !slices.Contains(h.DNSFrom, owner) {
+		return false
+	}
+	here := map[string]bool{}
+	for _, r := range h.Routes {
+		here[r.String()] = true
+	}
+	for _, r := range s.Published[owner][h.Name] {
+		if !here[r] {
+			return false
+		}
+	}
+	return true
 }
 
 // dnsState is the outcome for one hostname.
@@ -167,9 +190,7 @@ func (s *dnsSyncer) ensure(ctx context.Context, h translate.Hostname) (dnsState,
 			break
 		}
 		otherGateway = gw
-		if h.DNSParent == s.Gateway && slices.Contains(h.DNSFrom, gw) {
-			// A switching route attached to both Gateways names this one
-			// as the new owner.
+		if s.mayTakeOver(h, gw) {
 			txt = &txts[i]
 		}
 	}

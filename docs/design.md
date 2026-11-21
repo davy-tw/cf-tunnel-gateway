@@ -79,17 +79,27 @@ Annotations the controller writes:
 | `gateway` | generated routes | The parent Gateway the route should end up on |
 | `switch` | generated routes | Progress of a switch between parents |
 | `dns-hostnames` | Gateway | Hostnames whose DNS records the Gateway may own, for cleanup |
+| `signature` | Gateway | HMAC of `tunnel`, `previous-tunnel`, `hostnames` and `dns-hostnames` (see below) |
 | `grpc-notified` | Gateway | The gRPC zone-setting event was emitted |
 | `instance` | IngressClass | Installation that shipped the class |
 
 All annotation keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
 
 Anyone who can edit a Gateway or route can also write the annotations the
-controller writes, so they are bookkeeping, never proof: tunnels are only
-deleted when their name or an allowed `tunnel-id` ties them to the Gateway,
-`hostnames` only count on Gateways the controller accepted, and
-`default-hostname` and `dns-parent` only on generated routes whose derived
-hostname matches their source (see the sections below).
+controller writes. The Gateway annotations that decide what the controller
+may delete or which Gateway keeps a hostname (`tunnel`, `previous-tunnel`,
+`hostnames`, `dns-hostnames`) are therefore signed: `signature` is an
+HMAC-SHA256 over the Gateway's UID and their values, keyed with a random
+key the controller keeps in Secret `<instance>-signing-key` in its own
+namespace (created on first use). Values whose signature does not match are
+ignored and dropped on the next write, and the controller never signs a
+value it did not verify or write itself. Tunnels are only deleted when
+their name or a signed record ties them to the Gateway, and
+`default-hostname` and `dns-parent` are only trusted on generated routes
+whose derived hostname matches their source (see the sections below).
+Losing the key only drops the records: tunnels are found again by name, a
+replaced tunnel being switched away from is released rather than deleted,
+and hostname claims are rebuilt on the next reconcile of each Gateway.
 
 ## Controller configuration
 
@@ -574,11 +584,13 @@ hostnames or single tunnels, so isolation is layered:
    default, a namespace without the annotation publishes nothing.
 4. The first Gateway to publish a hostname keeps it: routes elsewhere,
    on older Gateways too, are `Accepted=False` naming the conflict. Claims
-   come from the `hostnames` annotations of Gateways the controller
-   accepted (cleared when a Gateway stops being accepted); when two
-   Gateways started publishing a hostname at once, the older one keeps it.
-   Whether a Gateway already publishes a hostname comes from what the
-   controller wrote, not from its editable annotation.
+   come from the signed `hostnames` annotations of accepted Gateways
+   (cleared when a Gateway stops being accepted), so they survive
+   controller restarts and cannot be forged; when two Gateways started
+   publishing a hostname at once, the older one keeps it. DNS records move
+   to another Gateway only when the switching route is attached to the
+   current owner and every route the owner publishes the hostname for
+   moves too.
 5. `tunnel-id` needs the namespace's `allow-tunnel-id: "true"`, so that a
    namespace cannot take over a tunnel it was not given.
 6. Namespace annotations are the policy surface because tenants normally
@@ -648,7 +660,7 @@ with the hostname.
 
 Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes
 (read, write, status, finalizers), ReferenceGrants (read), Secrets (read and
-write; Secrets are cached as metadata only, plus the controller's own token
+write, including the signing key in its own namespace; Secrets are cached as metadata only, plus the controller's own token
 Secrets), ConfigMaps, Services and their status and finalizers, Ingresses
 and their status and finalizers, IngressClasses, Namespaces, Deployments,
 PodDisruptionBudgets, HorizontalPodAutoscalers (read), the GatewayClass CRD
