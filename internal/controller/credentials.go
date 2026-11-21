@@ -167,7 +167,7 @@ func findZone(ctx context.Context, cf *cloudflare.Client, token, accountID, host
 	labels := strings.Split(name, ".")
 	for i := 0; i < len(labels)-1; i++ {
 		candidate := strings.Join(labels[i:], ".")
-		key := tokenKey(token) + "|" + candidate
+		key := cf.BaseURL + "|" + tokenKey(token) + "|" + candidate
 		zones.mu.Lock()
 		e, ok := zones.entries[key]
 		zones.mu.Unlock()

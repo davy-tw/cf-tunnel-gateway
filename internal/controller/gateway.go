@@ -129,11 +129,14 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 			return ctrl.Result{}, r.writeClassMissingStatus(ctx, gw)
 		}
 		done, err := r.finalize(ctx, gw, !deleting)
-		if err != nil || !done {
-			if err != nil {
-				log.FromContext(ctx).Error(err, "cleaning up")
+		if err != nil {
+			if d, ok := cloudflare.RetryAfter(err); ok {
+				return ctrl.Result{RequeueAfter: d}, nil
 			}
-			return ctrl.Result{RequeueAfter: time.Minute}, ignoreRateLimit(err)
+			return ctrl.Result{}, err
+		}
+		if !done {
+			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
 		orig := gw.DeepCopy()
 		controllerutil.RemoveFinalizer(gw, config.Finalizer)
@@ -712,6 +715,10 @@ func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unma
 	}
 	if gw.Annotations[config.AnnotationSkipCleanup] != "true" {
 		if err := r.cleanupCloudflare(ctx, gw); err != nil {
+			var pe *pendingError
+			if errors.As(err, &pe) {
+				return false, nil
+			}
 			return false, err
 		}
 	}
