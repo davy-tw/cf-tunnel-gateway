@@ -40,7 +40,7 @@ func (r *GatewayReconciler) managedGateways(ctx context.Context) []reconcile.Req
 			managed = gc != nil
 			classes[name] = managed
 		}
-		if managed || controllerutil.ContainsFinalizer(&gw, config.Finalizer) {
+		if managed || controllerutil.ContainsFinalizer(&gw, r.Config.Finalizer) {
 			out = append(out, reconcile.Request{NamespacedName: types.NamespacedName{Namespace: gw.Namespace, Name: gw.Name}})
 		}
 	}

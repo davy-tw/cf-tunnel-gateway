@@ -41,7 +41,7 @@ Everything this project owns lives under one domain,
 | --- | --- |
 | GatewayClass `controllerName` | `cf-tunnel-gateway.davy.tw/gateway-controller` (other instances: `cf-tunnel-gateway.davy.tw/gateway-controller-<instance>`) |
 | IngressClass `controller` | `cf-tunnel-gateway.davy.tw/ingress-controller` |
-| Finalizer (Gateways, LoadBalancer Services) | `cf-tunnel-gateway.davy.tw/finalizer` |
+| Finalizer (Gateways, LoadBalancer Services) | `cf-tunnel-gateway.davy.tw/finalizer` (other instances: `cf-tunnel-gateway.davy.tw/finalizer-<instance>`, so installations never finalize each other's objects) |
 | GatewayClass finalizer | `gateway-exists-finalizer.gateway.networking.k8s.io` (the standard one) |
 | Default GatewayClass, IngressClass, LoadBalancer class, shared Gateway | the instance name, `cf-tunnel-gateway` |
 
@@ -62,6 +62,7 @@ Annotations a user sets:
 | `gateway-class` | Namespace | Class for Gateways generated in the namespace |
 | `allowed-hostnames` | Namespace | Hostname patterns the namespace may publish |
 | `base-domain` | Namespace | Base domain for derived hostnames in the namespace |
+| `allow-tunnel-id: "true"` | Namespace | The namespace's Gateways may bind existing tunnels with `tunnel-id` |
 
 Annotations the controller writes:
 
@@ -82,6 +83,13 @@ Annotations the controller writes:
 | `instance` | IngressClass | Installation that shipped the class |
 
 All annotation keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
+
+Anyone who can edit a Gateway or route can also write the annotations the
+controller writes, so they are bookkeeping, never proof: tunnels are only
+deleted when their name or an allowed `tunnel-id` ties them to the Gateway,
+`hostnames` only count on Gateways the controller accepted, and
+`default-hostname` and `dns-parent` only on generated routes whose derived
+hostname matches their source (see the sections below).
 
 ## Controller configuration
 
@@ -233,13 +241,24 @@ intersection as the Gateway API specifies.
   exactly this name. The tunnel ID is recorded in the Gateway's `tunnel`
   annotation, and later lookups are by ID.
 - `tunnel-id: <id>` binds the Gateway to an existing remotely-managed
-  tunnel. The controller then owns its configuration and deletes it with
-  the Gateway unless `keep-tunnel: "true"` is also set. An unknown or
-  deleted ID, or one already bound to another Gateway, gives
-  `Accepted=False` / `InvalidParameters`. Changing `tunnel-id` switches
-  tunnels make-before-break: the new tunnel is configured, the token Secret
-  and connectors move to it, DNS records are repointed once it has a
-  connection, and the previous tunnel is deleted (unless `keep-tunnel`).
+  tunnel, if the namespace allows it (Namespace annotation
+  `allow-tunnel-id: "true"`; otherwise `Accepted=False` /
+  `InvalidParameters`): binding hands the namespace that tunnel's
+  configuration and connector token. The controller then owns its
+  configuration and deletes it with the Gateway unless `keep-tunnel:
+  "true"` is also set. An unknown or deleted ID, or one already bound to
+  another Gateway, gives `Accepted=False` / `InvalidParameters`. Changing
+  `tunnel-id` switches tunnels make-before-break: the new tunnel is
+  configured, the token Secret and connectors move to it, DNS records are
+  repointed once it has a connection, and the previous tunnel is deleted
+  if it carries the Gateway's tunnel name; a previously bound tunnel is
+  released, not deleted.
+- A tunnel is only ever deleted when it is the Gateway's own: it has the
+  Gateway's tunnel name, or it is the tunnel bound by an allowed
+  `tunnel-id`. IDs in the `tunnel` and `previous-tunnel` annotations that
+  do not pass this check are left alone with a Warning event. On deletion
+  the controller also looks for a tunnel of the Gateway's name whose ID was
+  never recorded.
 - The tunnel's remote configuration is a deterministic function of cluster
   state, written only by the Gateway reconciler and replaced as a whole. It
   always ends with a catch-all `http_status:404` rule.
@@ -382,9 +401,11 @@ first match wins.
 - One backend per rule: the highest weight wins, ties by order, weight 0
   is skipped; the `Accepted` message says when traffic splitting was
   reduced to one backend.
-- Backends must be Services (`InvalidKind`), exist and expose the port
-  (`BackendNotFound`), and be allowed by a ReferenceGrant when in another
-  namespace (`RefNotPermitted`). An unusable backend's rule answers
+- Backends must be Services (`InvalidKind`), exist, not be of type
+  `ExternalName` (whose name resolves wherever its author points it,
+  around ReferenceGrants), and expose the port (`BackendNotFound`), and be
+  allowed by a ReferenceGrant when in another namespace
+  (`RefNotPermitted`). An unusable backend's rule answers
   `http_status:503`, so its requests do not fall through to a shorter
   prefix that belongs to another backend.
 - Origins are `<scheme>://<service>.<namespace>.svc.<cluster domain>:<port>`.
@@ -451,7 +472,7 @@ wildcard CNAME), marked twice:
 
 An existing CNAME that is not ours is never overwritten: the conflict is
 reported on the route's parent status. The first Gateway to publish a
-hostname keeps it.
+hostname keeps it (see [Tenant isolation](#tenant-isolation)).
 
 With DNS disabled, tunnel rules are still written, and the Gateway's address
 is the CNAME target to point records at.
@@ -551,9 +572,16 @@ hostnames or single tunnels, so isolation is layered:
    out of the tunnel and DNS, and reported on the route. Shared Gateways
    copy the patterns into their listener hostnames. With the `deny`
    default, a namespace without the annotation publishes nothing.
-4. The first Gateway to publish a hostname keeps it: newer routes elsewhere
-   are `Accepted=False` naming the conflict.
-5. Namespace annotations are the policy surface because tenants normally
+4. The first Gateway to publish a hostname keeps it: routes elsewhere,
+   on older Gateways too, are `Accepted=False` naming the conflict. Claims
+   come from the `hostnames` annotations of Gateways the controller
+   accepted (cleared when a Gateway stops being accepted); when two
+   Gateways started publishing a hostname at once, the older one keeps it.
+   Whether a Gateway already publishes a hostname comes from what the
+   controller wrote, not from its editable annotation.
+5. `tunnel-id` needs the namespace's `allow-tunnel-id: "true"`, so that a
+   namespace cannot take over a tunnel it was not given.
+6. Namespace annotations are the policy surface because tenants normally
    cannot edit their Namespace. Some multi-tenancy tools let them; this
    policy is only as strong as that RBAC. A policy resource is on the
    roadmap.
@@ -622,7 +650,7 @@ Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes
 (read, write, status, finalizers), ReferenceGrants (read), Secrets (read and
 write; Secrets are cached as metadata only, plus the controller's own token
 Secrets), ConfigMaps, Services and their status and finalizers, Ingresses
-and their status, IngressClasses, Namespaces, Deployments,
+and their status and finalizers, IngressClasses, Namespaces, Deployments,
 PodDisruptionBudgets, HorizontalPodAutoscalers (read), the GatewayClass CRD
 (read, for the bundle version), Events, and a Lease in its own namespace.
 

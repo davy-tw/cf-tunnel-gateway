@@ -53,7 +53,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 	src := serviceSource(svc)
 	if !svc.DeletionTimestamp.IsZero() || !r.managed(svc) {
-		if !controllerutil.ContainsFinalizer(svc, config.Finalizer) {
+		if !controllerutil.ContainsFinalizer(svc, r.Config.Finalizer) {
 			return ctrl.Result{}, nil
 		}
 		if err := r.cleanupSource(ctx, src); err != nil {
@@ -65,12 +65,12 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}
 		}
 		orig := svc.DeepCopy()
-		controllerutil.RemoveFinalizer(svc, config.Finalizer)
+		controllerutil.RemoveFinalizer(svc, r.Config.Finalizer)
 		return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, svc, client.MergeFrom(orig)))
 	}
-	if !controllerutil.ContainsFinalizer(svc, config.Finalizer) {
+	if !controllerutil.ContainsFinalizer(svc, r.Config.Finalizer) {
 		orig := svc.DeepCopy()
-		controllerutil.AddFinalizer(svc, config.Finalizer)
+		controllerutil.AddFinalizer(svc, r.Config.Finalizer)
 		if err := r.Patch(ctx, svc, client.MergeFrom(orig)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -316,7 +316,7 @@ func (r *ServiceReconciler) managedServices(ctx context.Context, _ client.Object
 	}
 	var out []reconcile.Request
 	for i := range list.Items {
-		if r.managed(&list.Items[i]) || controllerutil.ContainsFinalizer(&list.Items[i], config.Finalizer) {
+		if r.managed(&list.Items[i]) || controllerutil.ContainsFinalizer(&list.Items[i], r.Config.Finalizer) {
 			out = append(out, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&list.Items[i])})
 		}
 	}

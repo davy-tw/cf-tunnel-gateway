@@ -104,7 +104,9 @@ until you add a policy in Zero Trust; otherwise create one yourself.
 
 - `cf-tunnel-gateway.davy.tw/tunnel-id: <id>` on a Gateway binds it to an
   existing remotely-managed tunnel; its configuration is then replaced by
-  the controller.
+  the controller. The namespace must allow it with the annotation
+  `cf-tunnel-gateway.davy.tw/allow-tunnel-id: "true"`, since binding gives
+  the namespace that tunnel's connector token.
 - With `disableConnector: "true"` in the Gateway's parameters ConfigMap,
   no Deployment is created; run `cloudflared tunnel run` anywhere with the
   `TUNNEL_TOKEN` from Secret `<gateway>-cloudflared-token`.

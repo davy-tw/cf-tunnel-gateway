@@ -114,7 +114,7 @@ All keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
 
 | Annotation | On | Meaning |
 | --- | --- | --- |
-| `tunnel-id` | Gateway | Bind to an existing remotely-managed tunnel |
+| `tunnel-id` | Gateway | Bind to an existing remotely-managed tunnel (needs `allow-tunnel-id` on the Namespace) |
 | `keep-tunnel: "true"` | Gateway | Do not delete the tunnel with the Gateway |
 | `dns: disabled` | Gateway | Do not manage DNS records |
 | `skip-cleanup: "true"` | Gateway | Skip Cloudflare cleanup on deletion (for lost credentials) |
@@ -128,6 +128,7 @@ All keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
 | `gateway-class` | Namespace | Class for Gateways generated in the namespace |
 | `allowed-hostnames` | Namespace | Hostname patterns (`a.example.com`, `*.example.com`) the namespace may publish |
 | `base-domain` | Namespace | Base domain for derived hostnames in the namespace |
+| `allow-tunnel-id: "true"` | Namespace | Let the namespace's Gateways bind existing tunnels |
 
 Namespace annotations are the tenant policy: they only hold if tenants
 cannot edit their own Namespace. Check your RBAC (and multi-tenancy tools
@@ -138,7 +139,7 @@ that delegate namespace edits) before relying on them.
 With a base domain, objects without a hostname get
 `<name>-<namespace>.<base domain>` (sanitized, at most 63 characters per
 label), and TCP ports `<name>-<namespace>-<port>.<base domain>`. A
-hostname belongs to the first Gateway that publishes it; newer routes
+hostname belongs to the first Gateway that publishes it; routes
 elsewhere report a conflict. Existing DNS records that the controller did
 not create are never overwritten.
 

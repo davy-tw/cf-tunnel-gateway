@@ -25,6 +25,9 @@ type nsPolicy struct {
 	// allows nothing.
 	AllowedHostnames []string
 	BaseDomain       string
+	// AllowTunnelID lets the namespace's Gateways bind existing tunnels
+	// with the tunnel-id annotation.
+	AllowTunnelID bool
 }
 
 func (p nsPolicy) classAllowed(name string) bool {
@@ -60,6 +63,7 @@ func policyFromNamespace(cfg *config.Config, n *corev1.Namespace) nsPolicy {
 		}
 	}
 	p.GatewayClass = strings.TrimSpace(a[config.AnnotationGatewayClass])
+	p.AllowTunnelID = strings.TrimSpace(a[config.AnnotationAllowTunnelID]) == "true"
 	if v, ok := a[config.AnnotationAllowedHostnames]; ok {
 		p.AllowedHostnames = translate.ParsePatterns(v)
 	} else if cfg.DenyUnlistedHostnames {

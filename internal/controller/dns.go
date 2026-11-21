@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -166,8 +167,9 @@ func (s *dnsSyncer) ensure(ctx context.Context, h translate.Hostname) (dnsState,
 			break
 		}
 		otherGateway = gw
-		if h.DNSParent == s.Gateway {
-			// A switching route names this Gateway as the new owner.
+		if h.DNSParent == s.Gateway && slices.Contains(h.DNSFrom, gw) {
+			// A switching route attached to both Gateways names this one
+			// as the new owner.
 			txt = &txts[i]
 		}
 	}

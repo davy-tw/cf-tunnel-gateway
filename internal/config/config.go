@@ -24,7 +24,8 @@ const DefaultInstance = "cf-tunnel-gateway"
 const (
 	DefaultControllerName = Domain + "/gateway-controller"
 	IngressControllerName = Domain + "/ingress-controller"
-	Finalizer             = Domain + "/finalizer"
+	// Finalizer is the default instance's finalizer; see Config.Finalizer.
+	Finalizer = Domain + "/finalizer"
 
 	// User-set Gateway annotations.
 	AnnotationTunnelID    = Domain + "/tunnel-id"
@@ -52,6 +53,7 @@ const (
 	AnnotationGatewayClass          = Domain + "/gateway-class"
 	AnnotationAllowedHostnames      = Domain + "/allowed-hostnames"
 	AnnotationBaseDomain            = Domain + "/base-domain"
+	AnnotationAllowTunnelID         = Domain + "/allow-tunnel-id"
 
 	// Annotations on generated objects.
 	AnnotationSource    = Domain + "/source"
@@ -94,13 +96,26 @@ const (
 	TemplateName          = "name"
 )
 
+// FinalizerFor returns the finalizer of an instance.
+func FinalizerFor(instance string) string {
+	if instance == DefaultInstance {
+		return Finalizer
+	}
+	return Finalizer + "-" + instance
+}
+
 // Config is the controller-wide configuration.
 type Config struct {
 	AccountID string
 	APIToken  string
 	APIURL    string
 
-	Instance          string
+	Instance string
+	// Finalizer is this installation's finalizer on Gateways and
+	// LoadBalancer Services: Finalizer for the default instance,
+	// Finalizer-<instance> otherwise, so that installations never
+	// finalize each other's objects.
+	Finalizer         string
 	ControllerName    string
 	GatewayClass      string
 	IngressClass      string
@@ -222,6 +237,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		APIToken:          get(EnvAPIToken, ""),
 		APIURL:            strings.TrimSuffix(get(EnvAPIURL, "https://api.cloudflare.com/client/v4"), "/"),
 		Instance:          instance,
+		Finalizer:         FinalizerFor(instance),
 		ControllerName:    get(EnvControllerName, controllerName),
 		GatewayClass:      get(EnvGatewayClass, instance),
 		IngressClass:      get(EnvIngressClass, instance),
@@ -265,6 +281,8 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if e := validation.IsDNS1123Label(c.Instance); len(e) > 0 {
 		errs = append(errs, fmt.Sprintf("%s %q: %s", EnvInstance, c.Instance, strings.Join(e, "; ")))
+	} else if e := validation.IsQualifiedName(c.Finalizer); len(e) > 0 {
+		errs = append(errs, fmt.Sprintf("%s %q is too long for the finalizer %q (at most 53 characters)", EnvInstance, c.Instance, c.Finalizer))
 	}
 	if e := validation.IsQualifiedName(c.LoadBalancerClass); len(e) > 0 {
 		errs = append(errs, fmt.Sprintf("%s %q: %s", EnvLoadBalancerClass, c.LoadBalancerClass, strings.Join(e, "; ")))

@@ -81,7 +81,7 @@ func (c *FrontDoorCleanup) Start(ctx context.Context) error {
 		}
 		for i := range list.Items {
 			svc := &list.Items[i]
-			if !controllerutil.ContainsFinalizer(svc, config.Finalizer) ||
+			if !controllerutil.ContainsFinalizer(svc, c.Config.Finalizer) ||
 				svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != c.Config.LoadBalancerClass {
 				continue
 			}
@@ -93,7 +93,7 @@ func (c *FrontDoorCleanup) Start(ctx context.Context) error {
 				}
 				orig = svc.DeepCopy()
 			}
-			controllerutil.RemoveFinalizer(svc, config.Finalizer)
+			controllerutil.RemoveFinalizer(svc, c.Config.Finalizer)
 			if err := c.Client.Patch(ctx, svc, client.MergeFrom(orig)); client.IgnoreNotFound(err) != nil {
 				logger.Error(err, "removing the finalizer", "service", svc.Namespace+"/"+svc.Name)
 			}

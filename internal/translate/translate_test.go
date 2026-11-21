@@ -3,6 +3,7 @@ package translate
 import (
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -316,12 +317,23 @@ func TestNamespacesAndPolicy(t *testing.T) {
 	derived.Namespace = "team-a"
 	derived.Spec.ParentRefs[0].Namespace = ptr.To(gwv1.Namespace("default"))
 	derived.Annotations = map[string]string{config.AnnotationDefaultHostname: "derived.apps.example.net"}
+	forged := route("forged", 4, []string{"forged.apps.example.net"}, rule("web"))
+	forged.Namespace = "team-a"
+	forged.Spec.ParentRefs[0].Namespace = ptr.To(gwv1.Namespace("default"))
+	forged.Annotations = map[string]string{config.AnnotationDefaultHostname: "forged.apps.example.net"}
 	claimed := route("claimed", 3, []string{"taken.example.com"}, rule("web"))
 	claimed.Namespace = "team-a"
 	claimed.Spec.ParentRefs[0].Namespace = ptr.To(gwv1.Namespace("default"))
 	res := Translate(&Input{
+		// Only the "derived" route counts as generated.
+		Generated: func(m metav1.ObjectMeta) (map[string]bool, string) {
+			if m.Name != "derived" {
+				return nil, ""
+			}
+			return AnnotatedDerived(m), ""
+		},
 		Gateway:         gw,
-		HTTPRoutes:      []*gwv1.HTTPRoute{a, b, derived, claimed},
+		HTTPRoutes:      []*gwv1.HTTPRoute{a, b, derived, forged, claimed},
 		NamespaceLabels: map[string]map[string]string{"team-a": {"team": "a"}, "team-b": {"team": "b"}},
 		AllowedHostnames: func(ns string) []string {
 			if ns == "team-a" {
@@ -336,6 +348,9 @@ func TestNamespacesAndPolicy(t *testing.T) {
 	}
 	if c := parentCond(t, res, "a", "PartiallyInvalid"); c == nil || !strings.Contains(c.Message, "evil.other.org is not allowed") {
 		t.Errorf("a: %+v", c)
+	}
+	if c := parentCond(t, res, "forged", "Accepted"); c.Status != "False" {
+		t.Errorf("forged: a default-hostname annotation on a user route bypassed the allowlist: %+v", c)
 	}
 	if c := parentCond(t, res, "derived", "Accepted"); c.Status != "True" {
 		t.Errorf("derived hostnames are exempt: %+v", c)
@@ -439,7 +454,15 @@ func TestDNSParent(t *testing.T) {
 	r := route("r", 0, []string{"app.example.com"}, rule("web"))
 	r.Annotations = map[string]string{config.AnnotationDNSParent: "default/new"}
 	res := Translate(&Input{Gateway: gw, HTTPRoutes: []*gwv1.HTTPRoute{r}})
-	if res.Hostnames[0].DNSParent != "default/new" || res.Hostnames[0].Routes[0] != (RouteRef{KindHTTPRoute, "default", "r"}) {
+	if res.Hostnames[0].DNSParent != "" {
+		t.Errorf("dns-parent trusted on a route that was not generated: %+v", res.Hostnames)
+	}
+	res = Translate(&Input{Gateway: gw, HTTPRoutes: []*gwv1.HTTPRoute{r},
+		Generated: func(m metav1.ObjectMeta) (map[string]bool, string) {
+			return nil, m.Annotations[config.AnnotationDNSParent]
+		}})
+	if res.Hostnames[0].DNSParent != "default/new" || res.Hostnames[0].Routes[0] != (RouteRef{KindHTTPRoute, "default", "r"}) ||
+		!slices.Equal(res.Hostnames[0].DNSFrom, []string{"default/gw"}) {
 		t.Errorf("%+v", res.Hostnames)
 	}
 }

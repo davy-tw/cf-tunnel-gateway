@@ -61,7 +61,7 @@ func (r *GatewayReconciler) ensureTunnel(ctx context.Context, gw *gwv1.Gateway, 
 			return previous, nil
 		}
 		if previous != "" && previous != recorded && previous != current && gw.Annotations[config.AnnotationKeepTunnel] != "true" {
-			if err := r.deleteTunnel(ctx, creds, previous); err != nil {
+			if err := r.deleteTunnel(ctx, gw, creds, previous); err != nil {
 				return "", err
 			}
 		}
@@ -69,6 +69,12 @@ func (r *GatewayReconciler) ensureTunnel(ctx context.Context, gw *gwv1.Gateway, 
 	}
 
 	if bound != "" {
+		if ok, err := r.bindingAllowed(ctx, gw); err != nil {
+			return nil, "", err
+		} else if !ok {
+			return nil, "", &invalidParamsError{fmt.Sprintf("annotation %s: namespace %s does not allow binding existing tunnels (Namespace annotation %s: \"true\")",
+				config.AnnotationTunnelID, gw.Namespace, config.AnnotationAllowTunnelID)}
+		}
 		t, err := r.getTunnel(ctx, creds, bound)
 		if err != nil {
 			return nil, "", err
@@ -176,29 +182,51 @@ func (r *GatewayReconciler) writeConfig(ctx context.Context, creds *Credentials,
 // connectorToken returns the tunnel's connector token.
 func (r *GatewayReconciler) connectorToken(ctx context.Context, creds *Credentials, id string) (string, error) {
 	r.mu.Lock()
-	tok, ok := r.tokens[id]
+	e, ok := r.tokens[id]
 	r.mu.Unlock()
-	if ok {
-		return tok, nil
+	if ok && time.Since(e.at) < refreshEvery {
+		return e.token, nil
 	}
 	tok, err := r.CF.TunnelToken(ctx, creds.AccountID, creds.AccountToken, id)
 	if err != nil {
 		return "", fmt.Errorf("getting the connector token: %w", err)
 	}
 	r.mu.Lock()
-	r.tokens[id] = tok
+	r.tokens[id] = tokenEntry{token: tok, at: time.Now()}
 	r.mu.Unlock()
 	return tok, nil
+}
+
+// tokenEntry is a cached connector token. It is fetched again every
+// refreshEvery, so that the token Secret follows a secret rotated
+// outside the controller.
+type tokenEntry struct {
+	token string
+	at    time.Time
 }
 
 // deleteTunnel deletes a tunnel so that its connectors cannot come back:
 // the tunnel secret is replaced first (invalidating every connector
 // token), then the open connections are dropped, then the tunnel goes.
-func (r *GatewayReconciler) deleteTunnel(ctx context.Context, creds *Credentials, id string) error {
+//
+// Only a tunnel the Gateway owns is deleted: one with the Gateway's tunnel
+// name, or the tunnel its namespace allowed it to bind with tunnel-id.
+// The tunnel and previous-tunnel annotations are only bookkeeping, and
+// anyone who can edit the Gateway can write them, so other tunnels are
+// left alone.
+func (r *GatewayReconciler) deleteTunnel(ctx context.Context, gw *gwv1.Gateway, creds *Credentials, id string) error {
 	t, err := r.getTunnel(ctx, creds, id)
 	if err != nil || t == nil {
 		r.forget(id)
 		return err
+	}
+	if owned, err := r.ownsTunnel(ctx, gw, t); err != nil {
+		return err
+	} else if !owned {
+		r.forget(id)
+		r.event(gw, corev1.EventTypeWarning, "TunnelNotDeleted",
+			"tunnel %s (%s) was not created by this Gateway nor bound by it with %s; it is left in place", t.Name, id, config.AnnotationTunnelID)
+		return nil
 	}
 	secret := make([]byte, 32)
 	if _, err := rand.Read(secret); err != nil {
@@ -214,7 +242,26 @@ func (r *GatewayReconciler) deleteTunnel(ctx context.Context, creds *Credentials
 		return fmt.Errorf("deleting tunnel %s: %w", id, err)
 	}
 	r.forget(id)
+	r.event(gw, corev1.EventTypeNormal, "TunnelDeleted", "deleted Cloudflare tunnel %s (%s)", t.Name, id)
 	return nil
+}
+
+// ownsTunnel reports whether t was created for gw, or is bound to it with
+// an allowed tunnel-id annotation.
+func (r *GatewayReconciler) ownsTunnel(ctx context.Context, gw *gwv1.Gateway, t *cloudflare.Tunnel) (bool, error) {
+	if t.Name == r.tunnelName(gw) {
+		return true, nil
+	}
+	if gw.Annotations[config.AnnotationTunnelID] != t.ID {
+		return false, nil
+	}
+	return r.bindingAllowed(ctx, gw)
+}
+
+// bindingAllowed reports whether gw's namespace may bind existing tunnels.
+func (r *GatewayReconciler) bindingAllowed(ctx context.Context, gw *gwv1.Gateway) (bool, error) {
+	pol, err := namespacePolicy(ctx, r.Client, r.Config, gw.Namespace)
+	return pol.AllowTunnelID, err
 }
 
 func (r *GatewayReconciler) forget(id string) {

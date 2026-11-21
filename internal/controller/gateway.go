@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -59,7 +60,11 @@ type GatewayReconciler struct {
 
 	mu      sync.Mutex
 	configs map[string]configEntry // tunnel ID -> last written configuration
-	tokens  map[string]string      // tunnel ID -> connector token
+	tokens  map[string]tokenEntry  // tunnel ID -> connector token
+	// published holds the hostnames each Gateway last published, as
+	// written by this process (unlike the hostnames annotation, which
+	// the Gateway's author can edit).
+	published map[types.UID]map[string]bool
 }
 
 type configEntry struct {
@@ -72,7 +77,7 @@ func NewGatewayReconciler(c client.Client, scheme *runtime.Scheme, cfg *config.C
 	return &GatewayReconciler{
 		classResolver: classResolver{Client: c, Config: cfg, CF: cf},
 		Scheme:        scheme, Features: f, Recorder: rec, ClusterID: clusterID,
-		configs: map[string]configEntry{}, tokens: map[string]string{},
+		configs: map[string]configEntry{}, tokens: map[string]tokenEntry{}, published: map[types.UID]map[string]bool{},
 	}
 }
 
@@ -120,7 +125,7 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 	}
 	deleting := !gw.DeletionTimestamp.IsZero()
 	if gc == nil || deleting {
-		if !controllerutil.ContainsFinalizer(gw, config.Finalizer) {
+		if !controllerutil.ContainsFinalizer(gw, r.Config.Finalizer) {
 			return ctrl.Result{}, nil
 		}
 		if !deleting && !classExists {
@@ -139,15 +144,15 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
 		}
 		orig := gw.DeepCopy()
-		controllerutil.RemoveFinalizer(gw, config.Finalizer)
+		controllerutil.RemoveFinalizer(gw, r.Config.Finalizer)
 		for _, a := range controllerAnnotations {
 			delete(gw.Annotations, a)
 		}
 		return ctrl.Result{}, client.IgnoreNotFound(r.Patch(ctx, gw, client.MergeFrom(orig)))
 	}
-	if !controllerutil.ContainsFinalizer(gw, config.Finalizer) {
+	if !controllerutil.ContainsFinalizer(gw, r.Config.Finalizer) {
 		orig := gw.DeepCopy()
-		controllerutil.AddFinalizer(gw, config.Finalizer)
+		controllerutil.AddFinalizer(gw, r.Config.Finalizer)
 		if err := r.Patch(ctx, gw, client.MergeFrom(orig)); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -168,6 +173,7 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		res := &translate.Result{AcceptedReason: ReasonNotAllowed, AcceptedMessage: msg}
 		return ctrl.Result{}, errors.Join(
 			r.withdraw(ctx, gw),
+			r.unpublish(ctx, gw),
 			r.writeRouteStatus(ctx, gw, rs, res, nil),
 			r.writeGatewayStatus(ctx, gw, res, nil, &pendingError{msg}, &outcome{}),
 		)
@@ -200,7 +206,7 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		progErr = &pendingError{ip.msg}
 	case !res.Accepted:
 		progErr = &pendingError{"Gateway is not accepted: " + res.AcceptedMessage}
-		if err := r.withdraw(ctx, gw); err != nil {
+		if err := errors.Join(r.withdraw(ctx, gw), r.unpublish(ctx, gw)); err != nil {
 			return ctrl.Result{}, err
 		}
 	default:
@@ -328,7 +334,56 @@ func (r *GatewayReconciler) translateInput(ctx context.Context, gw *gwv1.Gateway
 		return nil, err
 	}
 	in.Claimed = claimed
+	in.Generated = r.generatedRoute(ctx)
 	return in, nil
+}
+
+// generatedRoute returns the translate.Input.Generated callback. Route
+// authors can copy the labels, annotations and owner reference of a
+// generated route, so a derived hostname is only trusted when it is the
+// one the source's name and namespace derive, under the namespace's base
+// domain; the DNS parent is further checked against the route's parents
+// by DNS (dnsSyncer).
+func (r *GatewayReconciler) generatedRoute(ctx context.Context) func(metav1.ObjectMeta) (map[string]bool, string) {
+	bases := map[string]string{}
+	base := func(ns string) string {
+		b, ok := bases[ns]
+		if !ok {
+			b = r.Config.BaseDomain
+			if pol, err := namespacePolicy(ctx, r.Client, r.Config, ns); err == nil && pol.BaseDomain != "" {
+				b = pol.BaseDomain
+			}
+			bases[ns] = b
+		}
+		return b
+	}
+	return func(m metav1.ObjectMeta) (map[string]bool, string) {
+		kind := m.Labels[config.LabelSourceKind]
+		if m.Labels[connector.LabelManagedBy] != r.Config.Instance || (kind != config.SourceIngress && kind != config.SourceService) {
+			return nil, ""
+		}
+		owner := metav1.GetControllerOfNoCopy(&m)
+		if owner == nil || owner.Kind != map[string]string{config.SourceIngress: "Ingress", config.SourceService: "Service"}[kind] ||
+			m.Labels[config.LabelSourceName] != LabelValue(owner.Name) {
+			return nil, ""
+		}
+		var derived map[string]bool
+		if b := base(m.Namespace); b != "" {
+			allowed := map[string]bool{DefaultLabel(r.Config.HostnameTemplate, owner.Name, m.Namespace, "") + "." + b: true}
+			if port, ok := strings.CutPrefix(m.Name, owner.Name+"-tcp-"); ok {
+				allowed[DefaultLabel(r.Config.HostnameTemplate, owner.Name, m.Namespace, port)+"."+b] = true
+			}
+			for h := range translate.AnnotatedDerived(m) {
+				if allowed[h] {
+					if derived == nil {
+						derived = map[string]bool{}
+					}
+					derived[h] = true
+				}
+			}
+		}
+		return derived, m.Annotations[config.AnnotationDNSParent]
+	}
 }
 
 func needsNamespaceLabels(gw *gwv1.Gateway) bool {
@@ -341,9 +396,37 @@ func needsNamespaceLabels(gw *gwv1.Gateway) bool {
 	return false
 }
 
-// claimedHostnames returns the hostnames that older managed Gateways
-// publish, from their hostnames annotations. The oldest Gateway keeps a
-// hostname.
+// unpublish forgets the hostnames of a Gateway that publishes nothing,
+// so that they are no longer claimed.
+func (r *GatewayReconciler) unpublish(ctx context.Context, gw *gwv1.Gateway) error {
+	r.setPublished(gw, nil)
+	return r.setAnnotations(ctx, gw, map[string]string{config.AnnotationHostnames: ""})
+}
+
+func (r *GatewayReconciler) setPublished(gw *gwv1.Gateway, hosts []translate.Hostname) {
+	set := map[string]bool{}
+	for _, h := range hosts {
+		set[h.Name] = true
+	}
+	r.mu.Lock()
+	r.published[gw.UID] = set
+	r.mu.Unlock()
+}
+
+func (r *GatewayReconciler) publishes(gw *gwv1.Gateway, host string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.published[gw.UID][host]
+}
+
+// claimedHostnames returns the hostnames other managed Gateways publish,
+// from their hostnames annotations. The Gateway that publishes a
+// hostname first keeps it: another Gateway's claim counts unless this
+// Gateway already publishes the hostname and is the older of the two
+// (which settles two Gateways that started publishing at once). Only
+// Gateways this controller accepted count, and whether this Gateway
+// publishes a hostname comes from what this process wrote, not from the
+// editable annotation.
 func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gateway) (map[string]translate.Claim, error) {
 	var list gwv1.GatewayList
 	if err := r.List(ctx, &list); err != nil {
@@ -351,9 +434,11 @@ func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gatew
 	}
 	claimed := map[string]translate.Claim{}
 	classes := map[string]bool{}
+	sort.Slice(list.Items, func(i, j int) bool { return olderGateway(&list.Items[i], &list.Items[j]) })
 	for i := range list.Items {
 		other := &list.Items[i]
-		if other.UID == gw.UID || !olderGateway(other, gw) || !other.DeletionTimestamp.IsZero() {
+		if other.UID == gw.UID || !other.DeletionTimestamp.IsZero() ||
+			!conditionTrue(other.Status.Conditions, string(gwv1.GatewayConditionAccepted), other.Generation) {
 			continue
 		}
 		raw := other.Annotations[config.AnnotationHostnames]
@@ -374,7 +459,7 @@ func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gatew
 			continue
 		}
 		for host, routes := range parseHostnames(raw) {
-			if _, taken := claimed[host]; taken {
+			if _, taken := claimed[host]; taken || olderGateway(gw, other) && r.publishes(gw, host) {
 				continue
 			}
 			c := translate.Claim{Gateway: other.Namespace + "/" + other.Name}
@@ -534,6 +619,7 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 		return err
 	}
 
+	r.setPublished(gw, res.Hostnames)
 	ann := map[string]string{
 		config.AnnotationTunnel:       tun.ID,
 		config.AnnotationTokenSecret:  connector.SecretName(gw.Name),
@@ -561,7 +647,7 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 		dnsDone := !out.dnsManaged || out.dnsErr == nil
 		if r.programmed(out) && dnsDone {
 			if gw.Annotations[config.AnnotationKeepTunnel] != "true" {
-				if err := r.deleteTunnel(ctx, creds, previous); err != nil {
+				if err := r.deleteTunnel(ctx, gw, creds, previous); err != nil {
 					return err
 				}
 			}
@@ -710,6 +796,7 @@ func (r *GatewayReconciler) programmed(out *outcome) bool {
 // when the Gateway moved to another controller's class: its Kubernetes
 // objects are deleted too, since owner references keep them otherwise.
 func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unmanage bool) (bool, error) {
+	r.setPublished(gw, nil)
 	if err := r.writeFinalizingStatus(ctx, gw); err != nil {
 		return false, err
 	}
@@ -743,13 +830,13 @@ func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unma
 func (r *GatewayReconciler) cleanupCloudflare(ctx context.Context, gw *gwv1.Gateway) error {
 	tunnels := splitList(gw.Annotations[config.AnnotationTunnel] + "," + gw.Annotations[config.AnnotationPreviousTunnel])
 	dnsHosts := splitList(gw.Annotations[config.AnnotationDNSHostnames])
-	if len(tunnels) == 0 && len(dnsHosts) == 0 {
-		return nil
-	}
 	creds, err := r.gatewayCredentials(ctx, gw)
 	var ip *invalidParamsError
 	if err != nil && !asInvalid(err, &ip) {
 		return err
+	}
+	if ip != nil && len(tunnels) == 0 && len(dnsHosts) == 0 {
+		return nil // nothing recorded, and no credentials to look for more
 	}
 	if ip != nil {
 		if creds = r.fallbackCredentials(); creds == nil {
@@ -770,11 +857,21 @@ func (r *GatewayReconciler) cleanupCloudflare(ctx context.Context, gw *gwv1.Gate
 	if gw.Annotations[config.AnnotationKeepTunnel] == "true" {
 		return nil
 	}
+	// A tunnel created just before its ID could be recorded is found by
+	// its name.
+	if named, err := r.CF.ListTunnels(ctx, creds.AccountID, creds.AccountToken, r.tunnelName(gw)); err != nil {
+		return err
+	} else {
+		for _, t := range named {
+			if t.Name == r.tunnelName(gw) && !t.Deleted() && !slices.Contains(tunnels, t.ID) {
+				tunnels = append(tunnels, t.ID)
+			}
+		}
+	}
 	for _, id := range tunnels {
-		if err := r.deleteTunnel(ctx, creds, id); err != nil {
+		if err := r.deleteTunnel(ctx, gw, creds, id); err != nil {
 			return err
 		}
-		r.event(gw, corev1.EventTypeWarning, "TunnelDeleted", "deleted Cloudflare tunnel %s", id)
 	}
 	return nil
 }

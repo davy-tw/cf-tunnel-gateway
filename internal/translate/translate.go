@@ -76,8 +76,13 @@ type Input struct {
 	// GRPCRoute and TCPRoute are served by the cluster; TCPMode is the
 	// controller's TCP mode switch.
 	GRPCRoute, TCPRoute, TCPMode bool
-	// Claimed maps hostnames to the older Gateways that publish them.
+	// Claimed maps hostnames to the other Gateways that keep them.
 	Claimed map[string]Claim
+	// Generated returns, for a route the controller generated, its
+	// derived hostnames (exempt from allowed-hostnames) and its DNS
+	// parent. The annotations that carry them are ignored on every other
+	// route, since route authors can write them. Nil trusts no route.
+	Generated func(m metav1.ObjectMeta) (derived map[string]bool, dnsParent string)
 }
 
 // RouteRef identifies a route.
@@ -133,6 +138,9 @@ type Hostname struct {
 	// DNSParent is the Gateway ("namespace/name") that a switching route
 	// names as the owner of the hostname's DNS records, or "".
 	DNSParent string
+	// DNSFrom lists the Gateways ("namespace/name") that route is attached
+	// to: DNS records may only move to DNSParent from one of them.
+	DNSFrom []string
 }
 
 // Result is the output of Translate.
@@ -193,6 +201,7 @@ type entry struct {
 	ruleIdx  int
 	matchIdx int
 	dnsPar   string
+	dnsFrom  []string
 }
 
 type listenerState struct {
@@ -370,28 +379,38 @@ func (rc *routeCtx) unresolvedf(reason gwv1.RouteConditionReason, format string,
 	rc.unresolved = append(rc.unresolved, fmt.Sprintf(format, args...))
 }
 
-func routeMeta(m metav1.ObjectMeta, kind string, parents []gwv1.ParentReference, process func(*routeCtx)) *routeItem {
+func (t *translator) routeMeta(m metav1.ObjectMeta, kind string, parents []gwv1.ParentReference, process func(*routeCtx)) *routeItem {
 	it := &routeItem{ref: RouteRef{kind, m.Namespace, m.Name}, created: m.CreationTimestamp, generation: m.Generation,
-		parents: parents, dnsParent: m.Annotations[config.AnnotationDNSParent], process: process}
-	if v := m.Annotations[config.AnnotationDefaultHostname]; v != "" {
-		it.derived = map[string]bool{}
-		for _, h := range strings.Split(v, ",") {
-			it.derived[strings.ToLower(strings.TrimSpace(h))] = true
-		}
+		parents: parents, process: process}
+	if t.in.Generated != nil {
+		it.derived, it.dnsParent = t.in.Generated(m)
 	}
 	return it
+}
+
+// AnnotatedDerived parses a route's default-hostname annotation.
+func AnnotatedDerived(m metav1.ObjectMeta) map[string]bool {
+	v := m.Annotations[config.AnnotationDefaultHostname]
+	if v == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, h := range strings.Split(v, ",") {
+		out[strings.ToLower(strings.TrimSpace(h))] = true
+	}
+	return out
 }
 
 func (t *translator) processRoutes() {
 	var items []*routeItem
 	for _, r := range t.in.HTTPRoutes {
-		items = append(items, routeMeta(r.ObjectMeta, KindHTTPRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.httpRoute(r) }))
+		items = append(items, t.routeMeta(r.ObjectMeta, KindHTTPRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.httpRoute(r) }))
 	}
 	for _, r := range t.in.GRPCRoutes {
-		items = append(items, routeMeta(r.ObjectMeta, KindGRPCRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.grpcRoute(r) }))
+		items = append(items, t.routeMeta(r.ObjectMeta, KindGRPCRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.grpcRoute(r) }))
 	}
 	for _, r := range t.in.TCPRoutes {
-		items = append(items, routeMeta(r.ObjectMeta, KindTCPRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.tcpRoute(r) }))
+		items = append(items, t.routeMeta(r.ObjectMeta, KindTCPRoute, r.Spec.ParentRefs, func(rc *routeCtx) { rc.tcpRoute(r) }))
 	}
 	sort.SliceStable(items, func(i, j int) bool { return olderItem(items[i], items[j]) })
 	for _, it := range items {
@@ -695,6 +714,12 @@ func (rc *routeCtx) resolveBackend(ref gwv1.BackendObjectReference) (*backend, b
 		svc := t.in.GetService(ns, string(ref.Name))
 		if svc == nil {
 			rc.unresolvedf(gwv1.RouteReasonBackendNotFound, "backend Service %s/%s not found", ns, ref.Name)
+			return nil, false
+		}
+		if svc.Spec.Type == corev1.ServiceTypeExternalName {
+			// Its name resolves wherever its author points it, which would
+			// sidestep ReferenceGrants.
+			rc.unresolvedf(gwv1.RouteReasonBackendNotFound, "backend Service %s/%s is of type ExternalName, which is not supported", ns, ref.Name)
 			return nil, false
 		}
 		found := false
@@ -1139,6 +1164,17 @@ func (t *translator) add(host string, tcp bool, m mount, it *routeItem) string {
 		matchIdx: m.matchIdx,
 		dnsPar:   it.dnsParent,
 	}
+	if it.dnsParent != "" {
+		for _, p := range it.parents {
+			ns := it.ref.Namespace
+			if p.Namespace != nil {
+				ns = string(*p.Namespace)
+			}
+			if (p.Group == nil || *p.Group == gwv1.GroupName) && (p.Kind == nil || *p.Kind == "Gateway") {
+				e.dnsFrom = append(e.dnsFrom, ns+"/"+string(p.Name))
+			}
+		}
+	}
 	t.byKey[key] = e
 	t.entries = append(t.entries, e)
 	return ""
@@ -1324,7 +1360,7 @@ func (t *translator) render() (*cloudflare.TunnelConfig, []Hostname) {
 			h.Routes = append(h.Routes, e.owner)
 		}
 		if e.dnsPar != "" && h.DNSParent == "" {
-			h.DNSParent = e.dnsPar
+			h.DNSParent, h.DNSFrom = e.dnsPar, e.dnsFrom
 		}
 	}
 	cfg.Ingress = append(cfg.Ingress, cloudflare.IngressRule{Service: cloudflare.NotFoundService})
