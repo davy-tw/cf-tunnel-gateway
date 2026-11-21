@@ -23,6 +23,17 @@ rules:
       - grpcroutes/status
       - tcproutes/status
     verbs: [get, update, patch]
+  # Owner references with blockOwnerDeletion need update on the owner's
+  # finalizers (OwnerReferencesPermissionEnforcement).
+  - apiGroups: [gateway.networking.k8s.io]
+    resources: [gateways/finalizers]
+    verbs: [update]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses/finalizers]
+    verbs: [update]
+  - apiGroups: [""]
+    resources: [services/finalizers]
+    verbs: [update]
   # The bundle version of the installed Gateway API.
   - apiGroups: [apiextensions.k8s.io]
     resources: [customresourcedefinitions]
