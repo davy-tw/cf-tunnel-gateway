@@ -118,13 +118,18 @@ func (r *GatewayReconciler) ensureTunnel(ctx context.Context, gw *gwv1.Gateway, 
 		return nil, "", err
 	}
 	r.event(gw, corev1.EventTypeNormal, "TunnelCreated", "created Cloudflare tunnel %s (%s)", name, t.ID)
-	// Record the ID at once, so that a failure later in this reconcile
-	// does not create a second tunnel.
-	if err := r.setAnnotations(ctx, gw, map[string]string{config.AnnotationTunnel: t.ID}); err != nil {
+	// Record the new ID together with the tunnel it replaces at once, so
+	// that a failure later in this reconcile neither loses the replaced
+	// tunnel nor creates a second one. (Should this fail, the next
+	// reconcile adopts the new tunnel by its name.)
+	prev, err := replace(t.ID)
+	if err != nil {
 		return nil, "", err
 	}
-	prev, err := replace(t.ID)
-	return t, prev, err
+	if err := r.setAnnotations(ctx, gw, map[string]string{config.AnnotationTunnel: t.ID, config.AnnotationPreviousTunnel: prev}); err != nil {
+		return nil, "", err
+	}
+	return t, prev, nil
 }
 
 // boundElsewhere returns the Gateway, other than gw, that uses tunnel id.
