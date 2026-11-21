@@ -38,6 +38,7 @@ const (
 	AnnotationTokenSecret    = Domain + "/token-secret"
 	AnnotationHostnames      = Domain + "/hostnames"
 	AnnotationGRPCNotified   = Domain + "/grpc-notified"
+	AnnotationDNSHostnames   = Domain + "/dns-hostnames"
 
 	// Ingress and Service annotations.
 	AnnotationGateway         = Domain + "/gateway"
