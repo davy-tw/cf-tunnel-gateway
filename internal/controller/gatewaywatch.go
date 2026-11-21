@@ -4,6 +4,8 @@ import (
 	"context"
 	"sort"
 
+	"sigs.k8s.io/controller-runtime/pkg/manager"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -191,6 +193,9 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager, fw *FeatureWatche
 	}
 	c, err := b.Build(r)
 	if err != nil {
+		return err
+	}
+	if err := mgr.Add(manager.RunnableFunc(r.sweepRecords)); err != nil {
 		return err
 	}
 	if fw == nil {

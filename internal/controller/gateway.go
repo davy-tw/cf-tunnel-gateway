@@ -173,6 +173,7 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		res := &translate.Result{AcceptedReason: ReasonNotAllowed, AcceptedMessage: msg}
 		return ctrl.Result{}, errors.Join(
 			r.withdraw(ctx, gw),
+			r.release(ctx, gw),
 			r.writeRouteStatus(ctx, gw, rs, res, nil),
 			r.writeGatewayStatus(ctx, gw, res, nil, &pendingError{msg}, &outcome{}),
 		)
@@ -395,6 +396,50 @@ func needsNamespaceLabels(gw *gwv1.Gateway) bool {
 	return false
 }
 
+// recordedDNSHostnames returns the hostnames whose DNS records gw may own:
+// those in its record, plus any added to the annotation by hand (harmless,
+// since records are only removed when their TXT record says they are
+// gw's).
+func recordedDNSHostnames(rec map[string]string, gw *gwv1.Gateway) []string {
+	out := splitList(rec[config.AnnotationDNSHostnames])
+	for _, h := range splitList(gw.Annotations[config.AnnotationDNSHostnames]) {
+		if !slices.Contains(out, h) {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// release gives up the hostnames of a Gateway whose namespace no longer
+// allows its class, which its author cannot undo: the claim is dropped
+// and, with the sync policy, its DNS records are removed. (A Gateway that
+// is only not accepted keeps both.)
+func (r *GatewayReconciler) release(ctx context.Context, gw *gwv1.Gateway) error {
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return err
+	}
+	ann := map[string]string{config.AnnotationHostnames: ""}
+	if hosts := recordedDNSHostnames(rec, gw); len(hosts) > 0 && r.Config.DNSPolicy == config.DNSPolicySync {
+		creds, err := r.gatewayCredentials(ctx, gw)
+		var ip *invalidParamsError
+		if err != nil && !asInvalid(err, &ip) {
+			return err
+		}
+		if ip != nil {
+			creds = r.fallbackCredentials()
+		}
+		if creds != nil {
+			s := &dnsSyncer{CF: r.CF, Config: r.Config, Token: creds.DNSToken, Gateway: gatewayKey(gw)}
+			if err := s.RemoveAll(ctx, hosts); err != nil {
+				return err
+			}
+			ann[config.AnnotationDNSHostnames] = ""
+		}
+	}
+	return r.setAnnotations(ctx, gw, ann)
+}
+
 // publishedElsewhere maps the other Gateways ("namespace/name") to the
 // hostnames they publish and the routes that publish them, from their
 // records.
@@ -605,7 +650,11 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 	if previous != "" && tun.ActiveConnections() == 0 {
 		target = previous
 	}
-	recorded := splitList(gw.Annotations[config.AnnotationDNSHostnames])
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return err
+	}
+	recorded := recordedDNSHostnames(rec, gw)
 	dnsHosts := recorded
 	if out.dnsManaged {
 		claims, err := r.publishedElsewhere(ctx, gw)
@@ -872,7 +921,7 @@ func (r *GatewayReconciler) cleanupCloudflare(ctx context.Context, gw *gwv1.Gate
 		return err
 	}
 	tunnels := splitList(rec[config.AnnotationTunnel] + "," + rec[config.AnnotationPreviousTunnel])
-	dnsHosts := splitList(gw.Annotations[config.AnnotationDNSHostnames])
+	dnsHosts := recordedDNSHostnames(rec, gw)
 	creds, err := r.gatewayCredentials(ctx, gw)
 	var ip *invalidParamsError
 	if err != nil && !asInvalid(err, &ip) {

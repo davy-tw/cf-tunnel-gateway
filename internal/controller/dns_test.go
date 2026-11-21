@@ -3,6 +3,8 @@ package controller
 import (
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/translate"
 )
@@ -43,4 +45,20 @@ func TestTakeOverNeedsOwnersRecord(t *testing.T) {
 	if !s.mayTakeOver(h, "b/owner") {
 		t.Error("did not take over when every route moved")
 	}
+}
+
+func TestCacheOptionsKeepRecordsCached(t *testing.T) {
+	o := CacheOptions(&config.Config{WatchNamespaces: []string{"a"}, Namespace: "ctrl"})
+	for obj, b := range o.ByObject {
+		if _, ok := obj.(*corev1.ConfigMap); ok {
+			if _, ok := b.Namespaces["ctrl"]; !ok {
+				t.Errorf("ConfigMaps not cached in the controller namespace: %v", b.Namespaces)
+			}
+			if _, ok := b.Namespaces["a"]; !ok {
+				t.Errorf("ConfigMaps not cached in watched namespace: %v", b.Namespaces)
+			}
+			return
+		}
+	}
+	t.Error("no ConfigMap cache options")
 }

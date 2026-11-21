@@ -116,6 +116,8 @@ until you add a policy in Zero Trust; otherwise create one yourself.
 Delete Gateways, Ingresses and LoadBalancer Services first, while the
 controller still runs, so it deletes their tunnels and DNS records. The
 controller keeps a record ConfigMap per Gateway in its own namespace; keep
-that namespace (and include it in backups) while Gateways exist. If the
+that namespace while Gateways exist. Records are keyed by Gateway UID, so
+Gateways restored from a backup start without records: their tunnels are
+found again by name, and their hostnames are claimed afresh. If the
 credentials are gone, `cf-tunnel-gateway.davy.tw/skip-cleanup: "true"` lets
 a Gateway go without cleanup.

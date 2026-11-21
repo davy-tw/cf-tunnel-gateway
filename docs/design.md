@@ -89,7 +89,8 @@ controller writes. The Gateway annotations that decide what the controller
 may delete or which Gateway keeps a hostname (`tunnel`, `previous-tunnel`,
 `hostnames`, `dns-hostnames`) are therefore kept in a record that tenants
 cannot write: a ConfigMap `<instance>-gateway-<Gateway UID>` in the
-controller's namespace, deleted with the Gateway. The Gateway's
+controller's namespace, deleted with the Gateway (records whose Gateway
+is gone are also swept at start and every hour). The Gateway's
 annotations only mirror it for people to read; values written or restored
 by hand are ignored and replaced on the next write. Tunnels are only
 deleted when their name or the record ties them to the Gateway, and
@@ -593,7 +594,9 @@ hostnames or single tunnels, so isolation is layered:
    come from the Gateways' records, so they survive controller restarts
    and cannot be forged or replayed. A claim stands while its Gateway
    exists, also while it is not accepted (so a failed edit does not give
-   its hostnames away); when two Gateways started
+   its hostnames away), but not when its namespace stops allowing its
+   class: then the claim is dropped and, with the `sync` policy, its DNS
+   records are removed; when two Gateways started
    publishing a hostname at once, the older one keeps it. DNS records move
    to another Gateway only when the switching route is attached to the
    current owner and every route the owner publishes the hostname for

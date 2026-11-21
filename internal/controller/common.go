@@ -41,9 +41,16 @@ func CacheOptions(cfg *config.Config) cache.Options {
 	o := cache.Options{}
 	if len(cfg.WatchNamespaces) > 0 {
 		o.DefaultNamespaces = map[string]cache.Config{}
+		cms := map[string]cache.Config{}
 		for _, ns := range cfg.WatchNamespaces {
 			o.DefaultNamespaces[ns] = cache.Config{}
+			cms[ns] = cache.Config{}
 		}
+		// Gateway records live in the controller's namespace.
+		if cfg.Namespace != "" {
+			cms[cfg.Namespace] = cache.Config{}
+		}
+		o.ByObject = map[client.Object]cache.ByObject{&corev1.ConfigMap{}: {Namespaces: cms}}
 	}
 	return o
 }

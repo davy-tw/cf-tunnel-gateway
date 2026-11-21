@@ -343,3 +343,99 @@ func TestEnvtestNotAcceptedKeepsHostnames(t *testing.T) {
 		t.Errorf("other's route: %v", err)
 	}
 }
+
+// Revoking a namespace's class releases its Gateways' hostnames and DNS
+// records.
+func TestEnvtestRevokedClassReleasesHostnames(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("a"), namespace("b"), backendService("a", "web", 80), backendService("b", "web", 80),
+		httpGateway("a", "gw"), httpRoute("a", "app", "gw", "app.example.com", "web", 80))
+	e.markReady("a", "gw")
+	e.eventually("a publishes", e.routeParentCond("a", "app", "DNSRecordsReady", metav1.ConditionTrue))
+
+	ns := &corev1.Namespace{}
+	if err := e.get("", "a", ns); err != nil {
+		t.Fatal(err)
+	}
+	ns.Annotations = map[string]string{config.AnnotationAllowedGatewayClasses: "something-else"}
+	if err := e.c.Update(e.ctx, ns); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("released", func() error {
+		if r := e.record("CNAME", "app.example.com"); r != nil {
+			return fmt.Errorf("CNAME still there: %+v", r)
+		}
+		g := &gwv1.Gateway{}
+		if err := e.get("a", "gw", g); err != nil {
+			return err
+		}
+		if v := g.Annotations[config.AnnotationHostnames]; v != "" {
+			return fmt.Errorf("hostnames = %q", v)
+		}
+		return nil
+	})
+	e.create(httpGateway("b", "gw"), httpRoute("b", "app", "gw", "app.example.com", "web", 80))
+	e.markReady("b", "gw")
+	e.eventually("b publishes", e.routeParentCond("b", "app", "DNSRecordsReady", metav1.ConditionTrue))
+}
+
+// Clearing the dns-hostnames annotation does not leak DNS records.
+func TestEnvtestClearedDNSHostnamesStillCleanedUp(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("a"), backendService("a", "web", 80),
+		httpGateway("a", "gw"), httpRoute("a", "app", "gw", "app.example.com", "web", 80))
+	e.markReady("a", "gw")
+	e.eventually("publishes", e.routeParentCond("a", "app", "DNSRecordsReady", metav1.ConditionTrue))
+	g := &gwv1.Gateway{}
+	if err := e.get("a", "gw", g); err != nil {
+		t.Fatal(err)
+	}
+	delete(g.Annotations, config.AnnotationDNSHostnames)
+	if err := e.c.Update(e.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.c.Delete(e.ctx, httpRoute("a", "app", "gw", "", "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("records removed", func() error {
+		for _, typ := range []string{"CNAME", "TXT"} {
+			for _, r := range e.cf.Records(e.zoneID) {
+				if r.Type == typ && strings.HasSuffix(r.Name, "app.example.com") {
+					return fmt.Errorf("%s %s still there", typ, r.Name)
+				}
+			}
+		}
+		return nil
+	})
+}
+
+// Records of Gateways that are gone are swept.
+func TestEnvtestStaleRecordsSwept(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("a"), httpGateway("a", "gw"))
+	g := &gwv1.Gateway{}
+	e.eventually("recorded", func() error {
+		if err := e.get("a", "gw", g); err != nil {
+			return err
+		}
+		if g.Annotations[config.AnnotationTunnel] == "" {
+			return fmt.Errorf("no tunnel yet")
+		}
+		return nil
+	})
+	stale := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Namespace: e.cfg.Namespace, Name: recordName(e.cfg, "gone"), Labels: recordLabels(e.cfg)},
+		Data:       map[string]string{recordUIDField: "gone", "tunnel": "x"},
+	}
+	e.create(stale)
+	r := NewGatewayReconciler(e.c, e.scheme, e.cfg, nil, AllFeatures(), nil, "cluster-uid")
+	if err := r.sweepRecordsOnce(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.get(e.cfg.Namespace, stale.Name, &corev1.ConfigMap{}); !apierrors.IsNotFound(err) {
+		t.Errorf("stale record kept: %v", err)
+	}
+	if err := e.get(e.cfg.Namespace, recordName(e.cfg, g.UID), &corev1.ConfigMap{}); err != nil {
+		t.Errorf("live record: %v", err)
+	}
+}

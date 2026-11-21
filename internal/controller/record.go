@@ -4,6 +4,9 @@ import (
 	"context"
 	"maps"
 	"strings"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -79,10 +82,14 @@ func (r *GatewayReconciler) recorded(ctx context.Context, gw *gwv1.Gateway) (map
 }
 
 // records returns every Gateway record of this installation, by Gateway
-// UID.
+// UID, from the cache.
 func (r *GatewayReconciler) records(ctx context.Context) (map[types.UID]map[string]string, error) {
+	return r.listRecords(ctx, r.Client)
+}
+
+func (r *GatewayReconciler) listRecords(ctx context.Context, c client.Reader) (map[types.UID]map[string]string, error) {
 	var list corev1.ConfigMapList
-	if err := r.reader().List(ctx, &list, client.InNamespace(r.Config.Namespace), client.MatchingLabels(recordLabels(r.Config))); err != nil {
+	if err := c.List(ctx, &list, client.InNamespace(r.Config.Namespace), client.MatchingLabels(recordLabels(r.Config))); err != nil {
 		return nil, err
 	}
 	out := map[types.UID]map[string]string{}
@@ -135,4 +142,46 @@ func (r *GatewayReconciler) writeRecord(ctx context.Context, gw *gwv1.Gateway, r
 func (r *GatewayReconciler) deleteRecord(ctx context.Context, gw *gwv1.Gateway) error {
 	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: r.Config.Namespace, Name: recordName(r.Config, gw.UID)}}
 	return client.IgnoreNotFound(r.Delete(ctx, cm))
+}
+
+// sweepRecords deletes records whose Gateway is gone (its finalizer was
+// removed by hand, or a restore gave it a new UID), at start and then
+// every refreshEvery. It runs on the leader only.
+func (r *GatewayReconciler) sweepRecords(ctx context.Context) error {
+	for {
+		if err := r.sweepRecordsOnce(ctx); err != nil && ctx.Err() == nil {
+			log.FromContext(ctx).Error(err, "removing stale Gateway records")
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(refreshEvery):
+		}
+	}
+}
+
+func (r *GatewayReconciler) sweepRecordsOnce(ctx context.Context) error {
+	// Records first: a record is written only after its Gateway exists,
+	// so every Gateway with a record listed here is in the Gateway list.
+	recs, err := r.listRecords(ctx, r.reader())
+	if err != nil || len(recs) == 0 {
+		return err
+	}
+	var list gwv1.GatewayList
+	if err := r.reader().List(ctx, &list); err != nil {
+		return err
+	}
+	live := map[types.UID]bool{}
+	for i := range list.Items {
+		live[list.Items[i].UID] = true
+	}
+	for uid := range recs {
+		if !live[uid] {
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Namespace: r.Config.Namespace, Name: recordName(r.Config, uid)}}
+			if err := client.IgnoreNotFound(r.Delete(ctx, cm)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
