@@ -62,6 +62,7 @@ func TestInvalid(t *testing.T) {
 		"txt key dup": {EnvDNSTXTGatewayKey: "owner"},
 		"txt key sep": {EnvDNSTXTHeritageKey: "a=b"},
 		"heritage":    {EnvDNSTXTHeritage: "a,b"},
+		"owner id":    {EnvDNSOwnerID: "a=b"},
 		"allowlist":   {EnvHostnameDefault: "maybe"},
 	} {
 		if _, err := Load(env(m)); err == nil {

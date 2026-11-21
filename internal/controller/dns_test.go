@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
+	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/translate"
 )
 
 func TestOwnershipTXTAttributes(t *testing.T) {
@@ -28,5 +29,18 @@ func TestOwnershipTXTAttributes(t *testing.T) {
 		if _, _, ok := s.txtOwner(foreign); ok {
 			t.Errorf("%q counted as ours", foreign)
 		}
+	}
+}
+
+func TestTakeOverNeedsOwnersRecord(t *testing.T) {
+	ref := translate.RouteRef{Kind: "HTTPRoute", Namespace: "a", Name: "r"}
+	h := translate.Hostname{Name: "app.example.com", DNSParent: "a/new", DNSFrom: []string{"b/owner"}, Routes: []translate.RouteRef{ref}}
+	s := &dnsSyncer{Gateway: "a/new", Published: map[string]map[string][]string{}}
+	if s.mayTakeOver(h, "b/owner") {
+		t.Error("took over without a record of the owner's routes")
+	}
+	s.Published["b/owner"] = map[string][]string{"app.example.com": {ref.String()}}
+	if !s.mayTakeOver(h, "b/owner") {
+		t.Error("did not take over when every route moved")
 	}
 }

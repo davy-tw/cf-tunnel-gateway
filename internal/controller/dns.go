@@ -33,8 +33,9 @@ type dnsSyncer struct {
 // Gateway owner: a switching route names this Gateway as the new owner,
 // is attached to the owner too, and every route the owner publishes h
 // for is published here as well (one source moving all of its routes).
+// Without a record of the owner's routes nothing moves.
 func (s *dnsSyncer) mayTakeOver(h translate.Hostname, owner string) bool {
-	if h.DNSParent != s.Gateway || !slices.Contains(h.DNSFrom, owner) {
+	if h.DNSParent != s.Gateway || !slices.Contains(h.DNSFrom, owner) || len(s.Published[owner][h.Name]) == 0 {
 		return false
 	}
 	here := map[string]bool{}

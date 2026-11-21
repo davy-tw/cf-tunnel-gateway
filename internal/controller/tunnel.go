@@ -148,15 +148,16 @@ func (r *GatewayReconciler) boundElsewhere(ctx context.Context, gw *gwv1.Gateway
 	if err := r.List(ctx, &list); err != nil {
 		return "", err
 	}
+	recs, err := r.records(ctx)
+	if err != nil {
+		return "", err
+	}
 	for i := range list.Items {
 		other := &list.Items[i]
 		if other.UID == gw.UID {
 			continue
 		}
-		rec, err := r.recorded(ctx, other)
-		if err != nil {
-			return "", err
-		}
+		rec := recs[other.UID]
 		if rec[config.AnnotationTunnel] == id || rec[config.AnnotationPreviousTunnel] == id ||
 			other.Annotations[config.AnnotationTunnelID] == id && olderGateway(other, gw) {
 			return other.Namespace + "/" + other.Name, nil
@@ -256,8 +257,7 @@ func (r *GatewayReconciler) deleteTunnel(ctx context.Context, gw *gwv1.Gateway, 
 
 // ownsTunnel reports whether t was created for gw, or the controller
 // recorded it as gw's tunnel (after binding it with an allowed
-// tunnel-id), as shown by the signed tunnel and previous-tunnel
-// annotations.
+// tunnel-id) in the Gateway's record.
 func (r *GatewayReconciler) ownsTunnel(ctx context.Context, gw *gwv1.Gateway, t *cloudflare.Tunnel) (bool, error) {
 	if t.Name == r.tunnelName(gw) {
 		return true, nil

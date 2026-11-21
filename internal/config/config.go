@@ -41,9 +41,6 @@ const (
 	AnnotationHostnames      = Domain + "/hostnames"
 	AnnotationGRPCNotified   = Domain + "/grpc-notified"
 	AnnotationDNSHostnames   = Domain + "/dns-hostnames"
-	// AnnotationSignature authenticates the annotations above that the
-	// controller trusts (see the controller's signature.go).
-	AnnotationSignature = Domain + "/signature"
 
 	// Ingress and Service annotations.
 	AnnotationGateway         = Domain + "/gateway"
@@ -343,6 +340,9 @@ func Load(getenv func(string) string) (*Config, error) {
 			errs = append(errs, fmt.Sprintf("%s: %q is already used by %s", k.env, k.v, other))
 		}
 		seen[k.v] = k.env
+	}
+	if c.DNSOwnerID == "" || strings.ContainsAny(c.DNSOwnerID, ",=\" \t\n") {
+		errs = append(errs, fmt.Sprintf("%s: %q must be non-empty without ',', '=', quotes or spaces", EnvDNSOwnerID, c.DNSOwnerID))
 	}
 	if c.DNSTXTHeritage == "" || strings.ContainsAny(c.DNSTXTHeritage, ",=\" \t\n") {
 		errs = append(errs, fmt.Sprintf("%s: %q must be non-empty without ',', '=', quotes or spaces", EnvDNSTXTHeritage, c.DNSTXTHeritage))

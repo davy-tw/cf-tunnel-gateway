@@ -150,7 +150,7 @@ func TestEnvtestHostnameStaysWithFirstPublisher(t *testing.T) {
 		t.Errorf("CNAME = %+v, want %s", r, target)
 	}
 
-	// A restarted controller knows the same from the signed annotations.
+	// A restarted controller knows the same from the records.
 	fresh := NewGatewayReconciler(e.c, e.scheme, e.cfg, nil, AllFeatures(), nil, "cluster-uid")
 	for _, c := range []struct {
 		gw, claimant string
@@ -247,5 +247,99 @@ func TestEnvtestOtherInstallationsGatewayUntouched(t *testing.T) {
 	}
 	if len(g.Finalizers) != 1 || g.Annotations[config.AnnotationTunnel] != id || !e.tunnelExists(id) {
 		t.Errorf("touched: finalizers=%v annotations=%v tunnel exists=%v", g.Finalizers, g.Annotations, e.tunnelExists(id))
+	}
+}
+
+// Restoring an older copy of a Gateway's controller annotations changes
+// nothing: the controller trusts only its own record.
+func TestEnvtestReplayedAnnotationsClaimNothing(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("a"), namespace("b"), backendService("a", "web", 80), backendService("b", "web", 80),
+		httpGateway("a", "old"), httpRoute("a", "app", "old", "app.example.com", "web", 80))
+	e.markReady("a", "old")
+	e.eventually("old publishes", e.routeParentCond("a", "app", "DNSRecordsReady", metav1.ConditionTrue))
+	g := &gwv1.Gateway{}
+	if err := e.get("a", "old", g); err != nil {
+		t.Fatal(err)
+	}
+	saved := map[string]string{}
+	for k, v := range g.Annotations {
+		saved[k] = v
+	}
+	if !strings.Contains(saved[config.AnnotationHostnames], "app.example.com") {
+		t.Fatalf("hostnames annotation = %q", saved[config.AnnotationHostnames])
+	}
+
+	if err := e.c.Delete(e.ctx, httpRoute("a", "app", "old", "", "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("old lets go", func() error {
+		if r := e.record("CNAME", "app.example.com"); r != nil {
+			return fmt.Errorf("CNAME still there: %+v", r)
+		}
+		return nil
+	})
+	time.Sleep(1100 * time.Millisecond) // creation timestamps have second precision
+	e.create(httpGateway("b", "new"), httpRoute("b", "app", "new", "app.example.com", "web", 80))
+	e.markReady("b", "new")
+	e.eventually("new publishes", e.routeParentCond("b", "app", "DNSRecordsReady", metav1.ConditionTrue))
+	if err := e.get("b", "new", g); err != nil {
+		t.Fatal(err)
+	}
+	target := g.Annotations[config.AnnotationTunnel] + ".cfargotunnel.com"
+
+	if err := e.get("a", "old", g); err != nil {
+		t.Fatal(err)
+	}
+	g.Annotations = saved
+	if err := e.c.Update(e.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	e.create(httpRoute("a", "steal", "old", "app.example.com", "web", 80))
+	e.eventually("replayed claim rejected", e.routeParentCond("a", "steal", "Accepted", metav1.ConditionFalse))
+	time.Sleep(3 * time.Second)
+	if err := e.routeParentCond("b", "app", "Accepted", metav1.ConditionTrue)(); err != nil {
+		t.Errorf("publisher lost its route: %v", err)
+	}
+	if r := e.record("CNAME", "app.example.com"); r == nil || r.Content != target {
+		t.Errorf("CNAME = %+v, want %s", r, target)
+	}
+}
+
+// A Gateway that is not accepted for a while keeps its hostnames.
+func TestEnvtestNotAcceptedKeepsHostnames(t *testing.T) {
+	e := startEnv(t, envOptions{noIngressService: true})
+	e.create(namespace("a"), namespace("b"), backendService("a", "web", 80), backendService("b", "web", 80),
+		httpGateway("b", "own"), httpRoute("b", "app", "own", "app.example.com", "web", 80))
+	e.markReady("b", "own")
+	e.eventually("own publishes", e.routeParentCond("b", "app", "DNSRecordsReady", metav1.ConditionTrue))
+	g := &gwv1.Gateway{}
+	if err := e.get("b", "own", g); err != nil {
+		t.Fatal(err)
+	}
+	target := g.Annotations[config.AnnotationTunnel] + ".cfargotunnel.com"
+
+	g.Spec.Listeners[0].Port = 8080
+	if err := e.c.Update(e.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("own not accepted", e.gatewayCond("b", "own", "Accepted", metav1.ConditionFalse))
+	e.create(httpGateway("a", "other"), httpRoute("a", "steal", "other", "app.example.com", "web", 80))
+	e.markReady("a", "other")
+	e.eventually("other's route rejected", e.routeParentCond("a", "steal", "Accepted", metav1.ConditionFalse))
+
+	if err := e.get("b", "own", g); err != nil {
+		t.Fatal(err)
+	}
+	g.Spec.Listeners[0].Port = 80
+	if err := e.c.Update(e.ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("own publishes again", e.routeParentCond("b", "app", "DNSRecordsReady", metav1.ConditionTrue))
+	if r := e.record("CNAME", "app.example.com"); r == nil || r.Content != target {
+		t.Errorf("CNAME = %+v, want %s", r, target)
+	}
+	if err := e.routeParentCond("a", "steal", "Accepted", metav1.ConditionFalse)(); err != nil {
+		t.Errorf("other's route: %v", err)
 	}
 }
