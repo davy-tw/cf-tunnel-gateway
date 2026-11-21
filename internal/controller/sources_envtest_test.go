@@ -15,6 +15,7 @@ import (
 
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/cloudflare"
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
+	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/connector"
 )
 
 func ingressClass() *networkingv1.IngressClass {
@@ -251,4 +252,77 @@ func TestEnvtestLoadBalancerService(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+// Turning a front door off cleans up only this installation's objects.
+func TestEnvtestFrontDoorCleanupKeepsOtherInstallations(t *testing.T) {
+	e := startEnv(t, envOptions{bare: true})
+	mine := generatedLabels(e.cfg, config.SourceService, "web")
+	theirs := map[string]string{config.LabelSourceKind: config.SourceService, config.LabelSourceName: "web", connector.LabelManagedBy: "other"}
+	route := func(name string, labels map[string]string) *gwv1.HTTPRoute {
+		return &gwv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: "fd", Name: name, Labels: labels}}
+	}
+	shared := func(name, instance string) *gwv1.Gateway {
+		gw := httpGateway("fd", name)
+		gw.Labels = map[string]string{connector.LabelManagedBy: instance}
+		gw.Annotations = map[string]string{config.AnnotationManaged: config.ManagedShared}
+		return gw
+	}
+	lb := func(name, class string) *corev1.Service {
+		s := backendService("fd", name, 80)
+		s.Spec.Type = corev1.ServiceTypeLoadBalancer
+		s.Spec.LoadBalancerClass = ptr.To(class)
+		s.Finalizers = []string{config.Finalizer}
+		return s
+	}
+	e.create(namespace("fd"), route("mine", mine), route("theirs", theirs),
+		shared("mine", e.cfg.Instance), shared("theirs", "other"),
+		lb("mine", e.cfg.LoadBalancerClass), lb("theirs", "other"))
+
+	cfg := *e.cfg
+	cfg.IngressEnabled, cfg.ServiceEnabled = false, false
+	e.eventually("cache synced", func() error {
+		var l corev1.ServiceList
+		if err := e.c.List(e.ctx, &l, client.InNamespace("fd")); err != nil || len(l.Items) != 2 {
+			return fmt.Errorf("services: %d %v", len(l.Items), err)
+		}
+		var g gwv1.GatewayList
+		if err := e.c.List(e.ctx, &g, client.InNamespace("fd")); err != nil || len(g.Items) != 2 {
+			return fmt.Errorf("gateways: %d %v", len(g.Items), err)
+		}
+		var r gwv1.HTTPRouteList
+		if err := e.c.List(e.ctx, &r, client.InNamespace("fd")); err != nil || len(r.Items) != 2 {
+			return fmt.Errorf("routes: %d %v", len(r.Items), err)
+		}
+		return nil
+	})
+	if err := (&FrontDoorCleanup{Client: e.c, Config: &cfg, Features: AllFeatures()}).Start(e.ctx); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("own objects cleaned up", func() error {
+		if err := e.get("fd", "mine", &gwv1.HTTPRoute{}); !apierrors.IsNotFound(err) {
+			return fmt.Errorf("own route: %v", err)
+		}
+		if err := e.get("fd", "mine", &gwv1.Gateway{}); !apierrors.IsNotFound(err) {
+			return fmt.Errorf("own shared Gateway: %v", err)
+		}
+		if err := e.get("fd", "mine", &corev1.Service{}); !apierrors.IsNotFound(err) {
+			s := &corev1.Service{}
+			_ = e.get("fd", "mine", s)
+			if len(s.Finalizers) > 0 {
+				return fmt.Errorf("own Service keeps its finalizer")
+			}
+		}
+		return nil
+	})
+	if err := e.get("fd", "theirs", &gwv1.HTTPRoute{}); err != nil {
+		t.Errorf("another installation's route: %v", err)
+	}
+	if err := e.get("fd", "theirs", &gwv1.Gateway{}); err != nil {
+		t.Errorf("another installation's shared Gateway: %v", err)
+	}
+	s := &corev1.Service{}
+	if err := e.get("fd", "theirs", s); err != nil || len(s.Finalizers) != 1 {
+		t.Errorf("another class's Service: %v %v", err, s.Finalizers)
+	}
 }

@@ -24,6 +24,7 @@ import (
 
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/cloudflare"
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
+	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/connector"
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/translate"
 )
 
@@ -63,7 +64,7 @@ func (r *SharedGatewayReconciler) users(ctx context.Context, key types.Namespace
 		}
 		return false
 	}
-	opts := []client.ListOption{client.HasLabels{config.LabelSourceKind}}
+	opts := []client.ListOption{client.HasLabels{config.LabelSourceKind}, client.MatchingLabels(managedByLabels(r.Config))}
 	if r.Config.SharedScope == config.ScopeNamespace && r.configured(key) {
 		opts = append(opts, client.InNamespace(key.Namespace))
 	}
@@ -92,6 +93,12 @@ func (r *SharedGatewayReconciler) users(ctx context.Context, key types.Namespace
 	return http, tcp, nil
 }
 
+// isShared reports whether gw is a shared Gateway of this installation.
+func isShared(cfg *config.Config, gw *gwv1.Gateway) bool {
+	return gw.Annotations[config.AnnotationManaged] == config.ManagedShared &&
+		gw.Labels[connector.LabelManagedBy] == cfg.Instance
+}
+
 // Reconcile implements reconcile.Reconciler.
 func (r *SharedGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	key := req.NamespacedName
@@ -103,7 +110,7 @@ func (r *SharedGatewayReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		exists = false
 	}
-	if exists && existing.Annotations[config.AnnotationManaged] != config.ManagedShared {
+	if exists && !isShared(r.Config, existing) {
 		return ctrl.Result{}, nil // never touch a Gateway we did not create
 	}
 	http, tcp, err := r.users(ctx, key)
@@ -202,7 +209,7 @@ func (r *SharedGatewayReconciler) desired(ctx context.Context, key types.Namespa
 // sharedKeysForRoute maps a generated route to the shared Gateways it uses
 // or wants.
 func (r *SharedGatewayReconciler) sharedKeysForRoute(_ context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetLabels()[config.LabelSourceKind] == "" {
+	if l := obj.GetLabels(); l[config.LabelSourceKind] == "" || l[connector.LabelManagedBy] != r.Config.Instance {
 		return nil
 	}
 	keys := map[string]bool{}

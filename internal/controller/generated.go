@@ -18,6 +18,7 @@ import (
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
+	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/connector"
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/translate"
 )
 
@@ -60,17 +61,26 @@ type sourceObj struct {
 func (s sourceObj) key() string { return s.obj.GetNamespace() + "/" + s.obj.GetName() }
 
 // meta is the metadata of an object generated for the source.
-func (s sourceObj) meta(name string) metav1.ObjectMeta {
+func (s sourceObj) meta(cfg *config.Config, name string) metav1.ObjectMeta {
 	return metav1.ObjectMeta{
 		Name:        name,
 		Namespace:   s.obj.GetNamespace(),
 		Annotations: map[string]string{config.AnnotationSource: s.label},
-		Labels:      map[string]string{config.LabelSourceKind: s.label, config.LabelSourceName: LabelValue(s.obj.GetName())},
+		Labels:      generatedLabels(cfg, s.label, s.obj.GetName()),
 		OwnerReferences: []metav1.OwnerReference{{
 			APIVersion: s.apiVersion, Kind: s.kind, Name: s.obj.GetName(), UID: s.obj.GetUID(),
 			Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true),
 		}},
 	}
+}
+
+// generatedLabels mark an object generated for a source of this
+// installation.
+func generatedLabels(cfg *config.Config, kind, name string) map[string]string {
+	l := managedByLabels(cfg)
+	l[config.LabelSourceKind] = kind
+	l[config.LabelSourceName] = LabelValue(name)
+	return l
 }
 
 // LabelValue fits a name into a label value.
@@ -95,7 +105,7 @@ func (g *generator) applyGenerated(ctx context.Context, owner client.Object, obj
 // generated lists the objects of list's kind generated for src.
 func (g *generator) generated(ctx context.Context, src sourceObj, list client.ObjectList) ([]client.Object, error) {
 	if err := g.List(ctx, list, client.InNamespace(src.obj.GetNamespace()),
-		client.MatchingLabels{config.LabelSourceKind: src.label, config.LabelSourceName: LabelValue(src.obj.GetName())}); err != nil {
+		client.MatchingLabels(generatedLabels(g.Config, src.label, src.obj.GetName()))); err != nil {
 		if apierrors.IsNotFound(err) || isNoKindMatch(err) {
 			return nil, nil
 		}
@@ -218,7 +228,7 @@ func (g *generator) parentOf(ctx context.Context, src sourceObj, key string) par
 		switch {
 		case metav1.IsControlledBy(gw, src.obj):
 			p.Kind = parentDedicated
-		case gw.Annotations[config.AnnotationManaged] == config.ManagedShared:
+		case isShared(g.Config, gw):
 			p.Kind = parentShared
 		}
 	} else if ns == src.obj.GetNamespace() && name == src.obj.GetName() {
@@ -259,9 +269,9 @@ func (g *generator) parentProblem(ctx context.Context, src sourceObj, p parent) 
 	err := g.Get(ctx, types.NamespacedName{Namespace: p.Namespace, Name: p.Name}, gw)
 	switch p.Kind {
 	case parentShared:
-		if err == nil && gw.Annotations[config.AnnotationManaged] != config.ManagedShared {
-			return fmt.Sprintf("Gateway %s exists but is not a shared Gateway of this controller (annotation %s: %s); it is left alone",
-				p.key(), config.AnnotationManaged, config.ManagedShared)
+		if err == nil && !isShared(g.Config, gw) {
+			return fmt.Sprintf("Gateway %s exists but is not a shared Gateway of this installation (annotation %s: %s, label %s: %s); it is left alone",
+				p.key(), config.AnnotationManaged, config.ManagedShared, connector.LabelManagedBy, g.Config.Instance)
 		}
 	case parentExplicit:
 		if err != nil {
@@ -525,7 +535,7 @@ func (g *generator) dedicatedGateway(ctx context.Context, src sourceObj, tcpHost
 		return nil, err
 	}
 	gw := &gwv1.Gateway{
-		ObjectMeta: src.meta(src.obj.GetName()),
+		ObjectMeta: src.meta(g.Config, src.obj.GetName()),
 		Spec: gwv1.GatewaySpec{
 			GatewayClassName: gwv1.ObjectName(generatedClass(g.Config, pol)),
 			Listeners: []gwv1.Listener{{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80,

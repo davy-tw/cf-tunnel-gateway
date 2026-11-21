@@ -219,7 +219,7 @@ func (r *IngressReconciler) translate(ctx context.Context, ing *networkingv1.Ing
 			name = fmt.Sprintf("%s-%d", ing.Name, i)
 		}
 		rt := &gwv1.HTTPRoute{
-			ObjectMeta: src.meta(name),
+			ObjectMeta: src.meta(r.Config, name),
 			Spec: gwv1.HTTPRouteSpec{
 				Hostnames: []gwv1.Hostname{gwv1.Hostname(host)},
 				Rules:     g.rules,

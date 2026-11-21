@@ -12,11 +12,13 @@ import (
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
 	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/config"
+	"go.pkgs.davy.tw/cf-tunnel-gateway/internal/connector"
 )
 
-// FrontDoorCleanup removes what a turned-off front door generated: its
-// routes and dedicated Gateways, and (for Services) the finalizer and load
-// balancer status. It runs once, as the leader, at startup.
+// FrontDoorCleanup removes what a turned-off front door of this
+// installation generated: its routes and dedicated Gateways, and (for
+// Services of its loadBalancerClass) the finalizer and load balancer
+// status. It runs once, as the leader, at startup.
 type FrontDoorCleanup struct {
 	Client   client.Client
 	Config   *config.Config
@@ -42,7 +44,7 @@ func (c *FrontDoorCleanup) Start(ctx context.Context) error {
 			lists = append(lists, &gwv1.TCPRouteList{})
 		}
 		for _, l := range lists {
-			if err := c.Client.List(ctx, l, client.MatchingLabels{config.LabelSourceKind: kind}); err != nil {
+			if err := c.Client.List(ctx, l, client.MatchingLabels{config.LabelSourceKind: kind, connector.LabelManagedBy: c.Config.Instance}); err != nil {
 				logger.Error(err, "listing generated objects", "source", kind)
 				continue
 			}
@@ -61,7 +63,7 @@ func (c *FrontDoorCleanup) Start(ctx context.Context) error {
 		// users (with a front door on, the shared Gateway controller
 		// deletes unused ones).
 		var gws gwv1.GatewayList
-		if err := c.Client.List(ctx, &gws); err == nil {
+		if err := c.Client.List(ctx, &gws, client.MatchingLabels(managedByLabels(c.Config))); err == nil {
 			for i := range gws.Items {
 				if gws.Items[i].Annotations[config.AnnotationManaged] == config.ManagedShared {
 					if err := c.Client.Delete(ctx, &gws.Items[i]); client.IgnoreNotFound(err) != nil {
@@ -79,7 +81,8 @@ func (c *FrontDoorCleanup) Start(ctx context.Context) error {
 		}
 		for i := range list.Items {
 			svc := &list.Items[i]
-			if !controllerutil.ContainsFinalizer(svc, config.Finalizer) {
+			if !controllerutil.ContainsFinalizer(svc, config.Finalizer) ||
+				svc.Spec.LoadBalancerClass == nil || *svc.Spec.LoadBalancerClass != c.Config.LoadBalancerClass {
 				continue
 			}
 			orig := svc.DeepCopy()

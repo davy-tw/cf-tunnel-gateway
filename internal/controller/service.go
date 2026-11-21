@@ -269,7 +269,7 @@ func (r *ServiceReconciler) objects(svc *corev1.Service, plan ServicePlan) ([]ge
 	var routes []genRoute
 	if p := plan.HTTP; p != nil {
 		rt := &gwv1.HTTPRoute{
-			ObjectMeta: src.meta(fmt.Sprintf("%s-http-%d", svc.Name, p.Port)),
+			ObjectMeta: src.meta(r.Config, fmt.Sprintf("%s-http-%d", svc.Name, p.Port)),
 			Spec: gwv1.HTTPRouteSpec{
 				Rules: []gwv1.HTTPRouteRule{{
 					Matches: []gwv1.HTTPRouteMatch{{Path: &gwv1.HTTPPathMatch{Type: ptr.To(gwv1.PathMatchPathPrefix), Value: ptr.To("/")}}},
@@ -292,7 +292,7 @@ func (r *ServiceReconciler) objects(svc *corev1.Service, plan ServicePlan) ([]ge
 	}
 	for _, t := range plan.TCP {
 		rt := &gwv1.TCPRoute{
-			ObjectMeta: src.meta(fmt.Sprintf("%s-tcp-%d", svc.Name, t.Port)),
+			ObjectMeta: src.meta(r.Config, fmt.Sprintf("%s-tcp-%d", svc.Name, t.Port)),
 			Spec: gwv1.TCPRouteSpec{
 				Rules: []gwv1.TCPRouteRule{{BackendRefs: []gwv1.BackendRef{{BackendObjectReference: gwv1.BackendObjectReference{
 					Name: gwv1.ObjectName(svc.Name), Port: ptr.To(gwv1.PortNumber(t.Port)),
