@@ -32,6 +32,10 @@ import (
 // that revoked or expired tokens surface.
 const revalidateEvery = time.Hour
 
+// retryFailedEvery is how long a failed verification is remembered, so
+// that a transient Cloudflare error does not reject a class for long.
+const retryFailedEvery = time.Minute
+
 // GatewayClassReconciler validates managed GatewayClasses.
 type GatewayClassReconciler struct {
 	classResolver
@@ -103,7 +107,11 @@ func (r *GatewayClassReconciler) verify(ctx context.Context, gc *gwv1.GatewayCla
 	r.mu.Lock()
 	v, ok := r.verified[gc.UID]
 	r.mu.Unlock()
-	if ok && v.key == key && time.Since(v.at) < revalidateEvery {
+	ttl := revalidateEvery
+	if v.err != nil {
+		ttl = retryFailedEvery
+	}
+	if ok && v.key == key && time.Since(v.at) < ttl {
 		return v.err
 	}
 	err := r.check(ctx, c)
