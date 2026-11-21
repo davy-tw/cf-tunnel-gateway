@@ -1,0 +1,129 @@
+# The Gateway API CRDs (v1.6.0 or newer, Standard channel) must be installed
+# before the controller; this chart does not install them.
+
+image:
+  repository: ghcr.io/davy-tw/cf-tunnel-gateway/controller
+  # Defaults to the chart's appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# More than one replica only adds standbys: leader election keeps one active.
+replicaCount: 1
+
+# Cloudflare credentials (see docs/setup.md for the token permissions).
+cloudflare:
+  # Name of an existing Secret in the release namespace. It is loaded as
+  # environment variables (CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN and
+  # any other setting) and referenced by the chart's GatewayClass, so it
+  # may also hold the class keys accountId, apiToken and dnsApiToken.
+  # Takes precedence over the values below.
+  existingSecret: ""
+  # Set accountId and apiToken to have the chart create the Secret. Prefer
+  # existingSecret so the token stays out of Helm values.
+  accountId: ""
+  apiToken: ""
+  # Optional separate token for DNS records (stored as dnsApiToken).
+  dnsApiToken: ""
+  # API base URL (for tests).
+  apiUrl: ""
+
+# Identifies the installation; the class names, shared Gateway name, DNS
+# owner ID and leader-election Lease default to it. Give each installation
+# in a cluster its own.
+instance: cf-tunnel-gateway
+
+controller:
+  # GatewayClass spec.controllerName served. Defaults to
+  # cf-tunnel-gateway.davy.tw/gateway-controller (with -<instance> for
+  # other instance names).
+  name: ""
+  # Class of generated Gateways, IngressClass and loadBalancerClass served.
+  # Default to the instance name.
+  gatewayClass: ""
+  ingressClass: ""
+  loadBalancerClass: ""
+  ingress:
+    enabled: true
+  loadBalancer:
+    enabled: true
+  # Comma-separated namespaces to watch; empty watches all.
+  watchNamespaces: ""
+  # Cluster DNS domain used for backend Service hostnames.
+  clusterDomain: ""
+
+# Where Ingresses and LoadBalancer Services attach by default.
+sharedGateway:
+  # namespace (one shared Gateway per namespace) or cluster.
+  scope: namespace
+  # Defaults to the instance name.
+  name: ""
+  # With cluster scope; defaults to the release namespace.
+  namespace: ""
+  # ConfigMap (in the shared Gateway's namespace) copied into its
+  # infrastructure parametersRef.
+  parameters: ""
+
+hostnames:
+  # Base domain for derived hostnames of objects without one.
+  baseDomain: ""
+  # name-namespace or name.
+  template: ""
+  # allow, or deny: namespaces without allowed-hostnames publish nothing.
+  allowlistDefault: ""
+
+tcp:
+  # Lets LoadBalancer Services publish TCP ports (needs the TCPRoute CRD).
+  mode: false
+  # Create a deny-all Cloudflare Access application per TCP hostname.
+  accessApplications: false
+
+dns:
+  # sync or upsert-only.
+  policy: ""
+  ownerId: ""
+  txtPrefix: ""
+  comment: ""
+
+switch:
+  timeout: ""
+  gracePeriod: ""
+
+connector:
+  # cloudflared image for the connectors.
+  image: ""
+
+# Classes installed with the chart.
+gatewayClass:
+  create: true
+ingressClass:
+  create: true
+  # Make it the cluster's default IngressClass.
+  default: false
+
+# Additional environment variables for the controller.
+extraEnv: []
+
+serviceAccount:
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+metrics:
+  service:
+    enabled: true
+    port: 8080

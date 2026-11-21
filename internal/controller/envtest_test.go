@@ -82,6 +82,8 @@ type envOptions struct {
 	env map[string]string
 	// noIngressService skips the Ingress and Service reconcilers.
 	noIngressService bool
+	// bare runs only the API server: no reconcilers and no seeded objects.
+	bare bool
 }
 
 func startEnv(t *testing.T, o envOptions) *env {
@@ -129,9 +131,11 @@ func startEnv(t *testing.T, o envOptions) *env {
 			t.Fatal(err)
 		}
 	}
-	must(NewGatewayClassReconciler(c, cfg, cf).SetupWithManager(mgr))
-	must(NewGatewayReconciler(c, scheme, cfg, cf, AllFeatures(), rec, "cluster-uid").SetupWithManager(mgr, nil))
-	if !o.noIngressService {
+	if !o.bare {
+		must(NewGatewayClassReconciler(c, cfg, cf).SetupWithManager(mgr))
+		must(NewGatewayReconciler(c, scheme, cfg, cf, AllFeatures(), rec, "cluster-uid").SetupWithManager(mgr, nil))
+	}
+	if !o.noIngressService && !o.bare {
 		setupSources(t, mgr, c, scheme, cfg, cf, rec)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -145,6 +149,9 @@ func startEnv(t *testing.T, o envOptions) *env {
 		t.Fatal(err)
 	}
 	e := &env{t: t, ctx: ctx, c: direct, scheme: scheme, cf: fake, zoneID: zoneID, cfg: cfg}
+	if o.bare {
+		return e
+	}
 	e.create(namespace(ctrlNS), &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ctrlNS, Name: "cf-tunnel-gateway"},
 		Data:       map[string][]byte{KeyAccountID: []byte(testAccount), KeyAPIToken: []byte(testToken)},

@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cf-tunnel-gateway
+  namespace: cf-tunnel-gateway-system
+  labels:
+    app.kubernetes.io/name: cf-tunnel-gateway
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: cf-tunnel-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: cf-tunnel-gateway
+    spec:
+      serviceAccountName: cf-tunnel-gateway
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: cf-tunnel-gateway
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN and any other
+          # settings (see docs/setup.md) come from this optional Secret,
+          # which the cf-tunnel-gateway GatewayClass also references.
+          envFrom:
+            - secretRef:
+                name: cf-tunnel-gateway
+                optional: true
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

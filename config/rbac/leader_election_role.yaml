@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cf-tunnel-gateway-leader-election
+  namespace: cf-tunnel-gateway-system
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cf-tunnel-gateway-leader-election
+  namespace: cf-tunnel-gateway-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cf-tunnel-gateway-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: cf-tunnel-gateway
+    namespace: cf-tunnel-gateway-system

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cf-tunnel-gateway-system
+  labels:
+    app.kubernetes.io/name: cf-tunnel-gateway
+    pod-security.kubernetes.io/enforce: restricted

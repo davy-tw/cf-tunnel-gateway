@@ -1,0 +1,11 @@
+cf-tunnel-gateway {{ .Values.image.tag | default .Chart.AppVersion }} is installed in {{ .Release.Namespace }}.
+{{- if not (or .Values.cloudflare.existingSecret .Values.cloudflare.accountId) }}
+
+No Cloudflare credentials were given: create the Secret
+{{ include "cf-tunnel-gateway.secretName" . }} with CLOUDFLARE_ACCOUNT_ID and
+CLOUDFLARE_API_TOKEN in {{ .Release.Namespace }}. See docs/setup.md.
+{{- end }}
+
+Publish something with a Gateway of class {{ .Values.controller.gatewayClass | default (include "cf-tunnel-gateway.instance" .) }},
+an Ingress of class {{ .Values.controller.ingressClass | default (include "cf-tunnel-gateway.instance" .) }}, or a Service with
+type LoadBalancer and loadBalancerClass {{ .Values.controller.loadBalancerClass | default (include "cf-tunnel-gateway.instance" .) }}.

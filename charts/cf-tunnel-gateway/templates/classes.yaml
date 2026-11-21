@@ -1,0 +1,33 @@
+{{- $instance := include "cf-tunnel-gateway.instance" . }}
+{{- if .Values.gatewayClass.create }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: {{ .Values.controller.gatewayClass | default $instance }}
+  labels:
+    {{- include "cf-tunnel-gateway.labels" . | nindent 4 }}
+spec:
+  controllerName: {{ include "cf-tunnel-gateway.controllerName" . }}
+  description: Exposes Gateways through Cloudflare Tunnel.
+  parametersRef:
+    group: ""
+    kind: Secret
+    name: {{ include "cf-tunnel-gateway.secretName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- if .Values.ingressClass.create }}
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: {{ .Values.controller.ingressClass | default $instance }}
+  labels:
+    {{- include "cf-tunnel-gateway.labels" . | nindent 4 }}
+  annotations:
+    cf-tunnel-gateway.davy.tw/instance: {{ $instance }}
+    {{- if .Values.ingressClass.default }}
+    ingressclass.kubernetes.io/is-default-class: "true"
+    {{- end }}
+spec:
+  controller: cf-tunnel-gateway.davy.tw/ingress-controller
+{{- end }}
