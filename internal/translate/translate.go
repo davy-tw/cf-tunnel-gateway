@@ -14,6 +14,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -251,7 +252,6 @@ func (t *translator) compatibleKinds(p gwv1.ProtocolType) []string {
 }
 
 func (t *translator) buildListeners() {
-	tcpHosts := map[string]gwv1.SectionName{}
 	for _, l := range t.in.Gateway.Spec.Listeners {
 		ls := &listenerState{l: l, kinds: map[string]bool{}}
 		ls.res.Name = l.Name
@@ -284,17 +284,10 @@ func (t *translator) buildListeners() {
 				reject(gwv1.ListenerReasonUnsupportedProtocol, "TCP listeners need the controller's TCP mode")
 			case !t.in.TCPRoute:
 				reject(gwv1.ListenerReasonUnsupportedProtocol, "TCP listeners need the TCPRoute CRD")
-			case l.Hostname == nil || *l.Hostname == "" || strings.HasPrefix(string(*l.Hostname), "*"):
-				reject(gwv1.ListenerReasonUnsupportedValue, "TCP listeners need a hostname without a wildcard: a tunnel publishes TCP by hostname")
 			default:
-				h := strings.ToLower(string(*l.Hostname))
-				if other, dup := tcpHosts[h]; dup {
-					reject(gwv1.ListenerReasonUnsupportedValue, fmt.Sprintf("hostname %s is already used by TCP listener %q", h, other))
-				} else {
-					tcpHosts[h] = l.Name
-					conds = append(conds, cond(gwv1.ListenerConditionAccepted, true, gwv1.ListenerReasonAccepted,
-						"Listener accepted; the port is not exposed, clients reach the hostname with cloudflared access tcp", t.gen()))
-				}
+				conds = append(conds, cond(gwv1.ListenerConditionAccepted, true, gwv1.ListenerReasonAccepted,
+					"Listener accepted; the port is not exposed: each TCPRoute names its hostname with annotation "+config.AnnotationHostname+
+						", and clients reach it with cloudflared access tcp", t.gen()))
 			}
 		default:
 			reject(gwv1.ListenerReasonUnsupportedProtocol, fmt.Sprintf("protocol %q is not supported", l.Protocol))
@@ -1153,6 +1146,20 @@ func (t *translator) add(host string, tcp bool, m mount, it *routeItem) string {
 
 // ---- TCPRoute ----
 
+// TCPHostname returns the hostname a TCPRoute publishes, from its hostname
+// annotation (Gateway API TCP listeners cannot carry hostnames), or why it
+// has none.
+func TCPHostname(r *gwv1.TCPRoute) (string, string) {
+	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Annotations[config.AnnotationHostname]), "."))
+	switch {
+	case h == "":
+		return "", "a TCPRoute names the hostname it publishes with annotation " + config.AnnotationHostname
+	case strings.Contains(h, "*") || len(validation.IsDNS1123Subdomain(h)) > 0 || !strings.Contains(h, "."):
+		return "", fmt.Sprintf("annotation %s: %q is not a hostname (wildcards are not allowed)", config.AnnotationHostname, h)
+	}
+	return h, ""
+}
+
 func (rc *routeCtx) tcpRoute(r *gwv1.TCPRoute) {
 	t := rc.t
 	var service string
@@ -1188,12 +1195,15 @@ func (rc *routeCtx) tcpRoute(r *gwv1.TCPRoute) {
 			rr.Parents = append(rr.Parents, rc.parentResult(p, false, reason, msg, nil, nil))
 			continue
 		}
-		var hosts []string
 		for _, a := range atts {
 			a.ls.res.AttachedRoutes++
-			hosts = append(hosts, a.hostnames...)
 		}
-		hosts, problems, reason := rc.filterHosts(dedupe(hosts), true)
+		host, bad := TCPHostname(r)
+		if bad != "" {
+			rr.Parents = append(rr.Parents, rc.parentResult(p, false, gwv1.RouteReasonUnsupportedValue, bad, nil, nil))
+			continue
+		}
+		hosts, problems, reason := rc.filterHosts([]string{host}, true)
 		if len(hosts) == 0 {
 			rr.Parents = append(rr.Parents, rc.parentResult(p, false, reason, strings.Join(problems, "; "), nil, nil))
 			continue

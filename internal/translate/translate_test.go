@@ -110,13 +110,13 @@ func TestListeners(t *testing.T) {
 		gwv1.Listener{Name: "http8080", Protocol: gwv1.HTTPProtocolType, Port: 8080},
 		gwv1.Listener{Name: "tls", Protocol: gwv1.TLSProtocolType, Port: 443},
 		gwv1.Listener{Name: "tcp", Protocol: gwv1.TCPProtocolType, Port: 5432},
-		gwv1.Listener{Name: "tcp-host", Protocol: gwv1.TCPProtocolType, Port: 5432, Hostname: ptr.To(gwv1.Hostname("db.example.com"))},
+		gwv1.Listener{Name: "udp", Protocol: gwv1.UDPProtocolType, Port: 5432},
 		gwv1.Listener{Name: "kinds", Protocol: gwv1.HTTPProtocolType, Port: 80, AllowedRoutes: &gwv1.AllowedRoutes{Kinds: []gwv1.RouteGroupKind{{Kind: "TLSRoute"}}}},
 	)
 	res := Translate(&Input{Gateway: gw, TCPRoute: true, TCPMode: true, GRPCRoute: true})
 	want := map[string]string{
 		"http": "Accepted", "https": "Accepted", "http8080": "PortUnavailable", "tls": "UnsupportedProtocol",
-		"tcp": "UnsupportedValue", "tcp-host": "Accepted", "kinds": "Accepted",
+		"tcp": "Accepted", "udp": "UnsupportedProtocol", "kinds": "Accepted",
 	}
 	for _, l := range res.Listeners {
 		c := meta.FindStatusCondition(l.Conditions, "Accepted")
@@ -135,7 +135,7 @@ func TestListeners(t *testing.T) {
 	}
 
 	// TCP listeners without TCP mode.
-	res = Translate(&Input{Gateway: gateway(gw.Spec.Listeners[5]), TCPRoute: true})
+	res = Translate(&Input{Gateway: gateway(gw.Spec.Listeners[4]), TCPRoute: true})
 	if res.Accepted || res.AcceptedReason != "ListenersNotValid" {
 		t.Errorf("tcp without TCP mode accepted: %+v", res.Listeners)
 	}
@@ -399,9 +399,10 @@ func TestGRPC(t *testing.T) {
 
 func TestTCP(t *testing.T) {
 	gw := gateway(httpListener(),
-		gwv1.Listener{Name: "db", Protocol: gwv1.TCPProtocolType, Port: 5432, Hostname: ptr.To(gwv1.Hostname("db.example.com"))})
+		gwv1.Listener{Name: "db", Protocol: gwv1.TCPProtocolType, Port: 5432})
 	tr := &gwv1.TCPRoute{
-		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default", CreationTimestamp: metav1.NewTime(t0)},
+		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default", CreationTimestamp: metav1.NewTime(t0),
+			Annotations: map[string]string{config.AnnotationHostname: "DB.example.com"}},
 		Spec: gwv1.TCPRouteSpec{
 			CommonRouteSpec: gwv1.CommonRouteSpec{ParentRefs: []gwv1.ParentReference{{Name: "gw", SectionName: ptr.To(gwv1.SectionName("db"))}}},
 			Rules:           []gwv1.TCPRouteRule{{BackendRefs: []gwv1.BackendRef{{BackendObjectReference: gwv1.BackendObjectReference{Name: "pg", Port: ptr.To(gwv1.PortNumber(5432))}}}}},
@@ -423,6 +424,13 @@ func TestTCP(t *testing.T) {
 	}
 	if res.Listeners[1].AttachedRoutes != 1 {
 		t.Errorf("attached: %+v", res.Listeners[1])
+	}
+
+	// Without the hostname annotation, the route is rejected.
+	tr.Annotations = nil
+	res = Translate(&Input{Gateway: gw, TCPRoute: true, TCPMode: true, TCPRoutes: []*gwv1.TCPRoute{tr}})
+	if c := parentCond(t, res, "db", "Accepted"); c.Status != metav1.ConditionFalse || c.Reason != "UnsupportedValue" {
+		t.Errorf("no hostname: %+v", c)
 	}
 }
 

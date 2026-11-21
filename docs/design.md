@@ -55,7 +55,7 @@ Annotations a user sets:
 | `skip-cleanup: "true"` | Gateway | Skip all Cloudflare cleanup on deletion (credentials gone) |
 | `gateway` | Ingress, Service | `shared` (default), `dedicated`, or `<namespace>/<name>` |
 | `parameters` | Ingress, Service | ConfigMap copied to a dedicated Gateway's `spec.infrastructure.parametersRef` |
-| `hostname` | Service | Public hostname(s), comma-separated |
+| `hostname` | Service, TCPRoute | Public hostname(s) of a Service, comma-separated; the hostname a TCPRoute publishes |
 | `tcp-hostnames` | Service | TCP mode: `<port>[=<hostname>][,...]` |
 | `default-hostname: "false"` | Ingress, Service | Opt out of derived default hostnames |
 | `allowed-gateway-classes` | Namespace | Classes the namespace's Gateways may use |
@@ -75,6 +75,10 @@ Annotations the controller writes:
 | `managed: shared` | shared Gateways | Created and owned by the controller |
 | `dns-parent` | generated routes | During a switch, the Gateway that should own the DNS records |
 | `default-hostname` | generated routes | A hostname the controller derived (section [Default hostnames](#default-hostnames)) |
+| `gateway` | generated routes | The parent Gateway the route should end up on |
+| `switch` | generated routes | Progress of a switch between parents |
+| `dns-hostnames` | Gateway | Hostnames whose DNS records the Gateway may own, for cleanup |
+| `grpc-notified` | Gateway | The gRPC zone-setting event was emitted |
 | `instance` | IngressClass | Installation that shipped the class |
 
 All annotation keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
@@ -205,8 +209,7 @@ can point at the same Secret.
 | `HTTP` on 80 | Accepted. The recommended listener |
 | `HTTPS` on 443 | Accepted, with a message that edge certificates are used and `tls.certificateRefs` are ignored |
 | `HTTP` or `HTTPS` on another port | `Accepted=False` / `PortUnavailable`: Cloudflare serves a proxied hostname on all its ports at once, so a port cannot restrict anything |
-| `TCP` with a non-wildcard `hostname` | Accepted when TCP mode is on and TCPRoute is served; the port is not exposed or checked, the hostname is what the tunnel publishes |
-| `TCP` without a hostname | `Accepted=False` / `UnsupportedValue` |
+| `TCP` | Accepted when TCP mode is on and TCPRoute is served; the port is not exposed or checked (Gateway API does not allow a hostname on TCP listeners, so each TCPRoute names its hostname, see [TCPRoute](#tcproute)) |
 | anything else | `Accepted=False` / `UnsupportedProtocol` |
 
 HTTP and HTTPS listeners carry HTTPRoute and GRPCRoute (when served); TCP
@@ -317,9 +320,9 @@ running. The ConfigMap is watched. Other kinds are ignored.
 - `Programmed=True` / `Programmed` once the tunnel, configuration, token
   Secret and Deployment are written, a connector replica is ready and the
   tunnel reports at least one active connection (with the connector
-  disabled: once the tunnel reports a connection from user-run connectors,
-  or immediately when it is first set up). Until then `Programmed=False` /
-  `Pending`, rechecked every few seconds.
+  disabled: once the tunnel, configuration and token Secret are written;
+  the message gives the number of connections from user-run connectors).
+  Until then `Programmed=False` / `Pending`, rechecked every few seconds.
 - Listeners report `supportedKinds`, `attachedRoutes` (attached routes per
   listener, as the spec defines) and their conditions.
 - `status.addresses` holds a `Hostname` address `<tunnel-id>.cfargotunnel.com`.
@@ -416,8 +419,9 @@ emits one Normal event per Gateway when a GRPCRoute first attaches.
 
 ### TCPRoute
 
-An accepted TCPRoute on a hostnamed TCP listener becomes a rule for that
-hostname with origin `tcp://<service FQDN>:<port>` (first backend of the
+An accepted TCPRoute on a TCP listener becomes a rule for the hostname in
+its `hostname` annotation (one non-wildcard hostname; without it the route
+is `Accepted=False` / `UnsupportedValue`) with origin `tcp://<service FQDN>:<port>` (first backend of the
 first rule). These hostnames are not reachable by ordinary visitors: a
 client runs `cloudflared access tcp`. They get the same DNS handling as HTTP
 hostnames.
@@ -471,10 +475,10 @@ shared Gateway by default, so many objects share one tunnel and one
 - Shared Gateways are annotated `managed: shared`, have no owner, and the
   controller rewrites their listeners: an `http` listener on 80 for
   HTTPRoutes (`from: Same` or `All`), one per allowed hostname pattern when
-  the namespace has `allowed-hostnames`, and in TCP mode one `TCP` listener
-  per published TCP hostname (`tcp-<hash>`), limited to the namespace of the
-  Service that asked for it. At most 64 listeners: Services beyond that get
-  a Warning event and keep waiting (first come, first kept).
+  the namespace has `allowed-hostnames` (plus `http-default` for
+  `*.<base domain>`, since derived hostnames are exempt from the
+  allowlist), and in TCP mode one `tcp` listener (port 1, which nothing
+  listens on) for the TCPRoutes.
 - A Gateway with the shared name that lacks the annotation is never
   touched; generated routes wait and their sources get a Warning event.
 - A shared Gateway that is no longer the configured one (after a scope or
@@ -600,8 +604,9 @@ controller adds its finalizer.
 ### TCP mode
 
 With TCP mode on and TCPRoute served, `tcp-hostnames: <port>[=<hostname>]`
-publishes TCP ports: per port a `TCP` listener with the hostname on the
-parent Gateway and TCPRoute `<svc>-tcp-<port>`. Each hostname belongs to one
+publishes TCP ports: per port a TCPRoute `<svc>-tcp-<port>` with the
+hostname in its `hostname` annotation, attached to the parent Gateway's
+`tcp` listener (a TCP listener cannot carry a hostname). Each hostname belongs to one
 port of one Service (the oldest claim wins). Clients need
 `cloudflared access tcp`, and an Access policy should protect these
 hostnames: the controller emits a Normal event saying so, or, with Access
