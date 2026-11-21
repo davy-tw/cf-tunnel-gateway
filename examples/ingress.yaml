@@ -1,0 +1,62 @@
+# An Ingress published through the namespace's shared Gateway (one tunnel
+# and one cloudflared Deployment for every Ingress and LoadBalancer Service
+# in the namespace). spec.tls is not needed: Cloudflare serves the hostname
+# with its edge certificate.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: site
+  namespace: cf-demo
+spec:
+  ingressClassName: cf-tunnel-gateway
+  rules:
+    - host: site.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port: {name: http}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: {number: 80}
+---
+# The same, with a tunnel of its own (a dedicated Gateway named after the
+# Ingress), and connector settings from a ConfigMap.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+  namespace: cf-demo
+  annotations:
+    cf-tunnel-gateway.davy.tw/gateway: dedicated
+    cf-tunnel-gateway.davy.tw/parameters: connector
+spec:
+  ingressClassName: cf-tunnel-gateway
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port: {number: 80}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: connector
+  namespace: cf-demo
+data:
+  replicas: "2"
+  logLevel: info
+  resources: |
+    requests: {cpu: 10m, memory: 32Mi}
+    limits: {memory: 128Mi}

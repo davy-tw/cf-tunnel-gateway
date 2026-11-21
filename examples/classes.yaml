@@ -1,0 +1,32 @@
+# Zone separation: a second GatewayClass whose Secret holds a DNS token
+# limited to one zone (the account token comes from the controller), and a
+# namespace that may only use it and only publish under that zone.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: team-a
+  namespace: cf-tunnel-gateway-system
+stringData:
+  dnsApiToken: replace-with-a-zone-scoped-token
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: team-a
+spec:
+  controllerName: cf-tunnel-gateway.davy.tw/gateway-controller
+  parametersRef:
+    group: ""
+    kind: Secret
+    name: team-a
+    namespace: cf-tunnel-gateway-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  annotations:
+    cf-tunnel-gateway.davy.tw/allowed-gateway-classes: team-a
+    cf-tunnel-gateway.davy.tw/gateway-class: team-a
+    cf-tunnel-gateway.davy.tw/allowed-hostnames: "*.team-a.example.com"
+    cf-tunnel-gateway.davy.tw/base-domain: team-a.example.com

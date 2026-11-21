@@ -1,0 +1,36 @@
+# A LoadBalancer Service published at a hostname. Its first HTTP port is
+# served over HTTP(S) on Cloudflare's edge.
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-public
+  namespace: cf-demo
+  annotations:
+    cf-tunnel-gateway.davy.tw/hostname: www.example.com
+spec:
+  type: LoadBalancer
+  loadBalancerClass: cf-tunnel-gateway
+  selector: {app: web}
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      appProtocol: http
+---
+# With TCP mode on (controller setting), a TCP port can be published too.
+# Clients reach it with `cloudflared access tcp --hostname ssh.example.com
+# --url localhost:2222`; protect it with a Cloudflare Access policy.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ssh
+  namespace: cf-demo
+  annotations:
+    cf-tunnel-gateway.davy.tw/tcp-hostnames: "22=ssh.example.com"
+spec:
+  type: LoadBalancer
+  loadBalancerClass: cf-tunnel-gateway
+  selector: {app: ssh}
+  ports:
+    - name: ssh
+      port: 22
