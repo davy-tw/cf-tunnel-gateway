@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -143,10 +144,17 @@ var hostnamesChanged = predicate.Funcs{
 	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
-var createDelete = predicate.Funcs{
-	CreateFunc:  func(event.CreateEvent) bool { return true },
-	DeleteFunc:  func(event.DeleteEvent) bool { return true },
-	UpdateFunc:  func(event.UpdateEvent) bool { return false },
+// servicePortsChanged passes Service creation, deletion, and changes of
+// the ports, which route translation reads (port numbers, names and
+// appProtocol).
+var servicePortsChanged = predicate.Funcs{
+	CreateFunc: func(event.CreateEvent) bool { return true },
+	DeleteFunc: func(event.DeleteEvent) bool { return true },
+	UpdateFunc: func(e event.UpdateEvent) bool {
+		o, ok1 := e.ObjectOld.(*corev1.Service)
+		n, ok2 := e.ObjectNew.(*corev1.Service)
+		return !ok1 || !ok2 || !equality.Semantic.DeepEqual(o.Spec.Ports, n.Spec.Ports)
+	},
 	GenericFunc: func(event.GenericEvent) bool { return false },
 }
 
@@ -169,7 +177,7 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager, fw *FeatureWatche
 		Watches(&corev1.ConfigMap{}, handler.EnqueueRequestsFromMapFunc(r.gatewaysForConfigMap)).
 		WatchesMetadata(secretMetadata(), handler.EnqueueRequestsFromMapFunc(r.gatewaysForSecret),
 			builder.WithPredicates(predicate.ResourceVersionChangedPredicate{})).
-		Watches(&corev1.Service{}, all, builder.WithPredicates(createDelete)).
+		Watches(&corev1.Service{}, all, builder.WithPredicates(servicePortsChanged)).
 		Watches(&corev1.Namespace{}, all, builder.WithPredicates(namespaceChanged)).
 		Watches(&gwv1.HTTPRoute{}, routeHandler)
 	if r.Features.GRPCRoute() {

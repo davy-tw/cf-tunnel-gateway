@@ -335,6 +335,24 @@ func TestEnvtestGatewayLifecycle(t *testing.T) {
 	if cfg.OriginRequest == nil || ptr.Deref(cfg.OriginRequest.KeepAliveConnections, 0) != -1 {
 		t.Errorf("origin request = %+v", cfg.OriginRequest)
 	}
+
+	// A change of the backend's ports reaches the tunnel without waiting
+	// for the periodic refresh.
+	svc := &corev1.Service{}
+	if err := e.get("demo", "web", svc); err != nil {
+		t.Fatal(err)
+	}
+	svc.Spec.Ports[0].AppProtocol = ptr.To("https")
+	if err := e.c.Update(e.ctx, svc); err != nil {
+		t.Fatal(err)
+	}
+	e.eventually("origin follows the Service", func() error {
+		if c := e.cf.Config(tunnelID); c == nil || len(c.Ingress) == 0 || c.Ingress[0].Service != "https://web.demo.svc.cluster.local:80" {
+			return fmt.Errorf("config = %+v", c)
+		}
+		return nil
+	})
+
 	cname := e.record("CNAME", "app.example.com")
 	if cname == nil || cname.Content != tunnelID+".cfargotunnel.com" || !ptr.Deref(cname.Proxied, false) {
 		t.Fatalf("CNAME = %+v", cname)
