@@ -129,6 +129,8 @@ Secret in the controller's namespace.
 | DNS owner ID | instance name | Written into DNS ownership records |
 | DNS TXT prefix | `_cf-tunnel-gateway` | Label prefixed to a hostname to name its ownership TXT record |
 | DNS comment | `managed by cf-tunnel-gateway` | Comment on managed records, for humans |
+| DNS TXT attribute names | `heritage`, `owner`, `gateway` | Attribute names in the ownership TXT records |
+| DNS TXT heritage | `cf-tunnel-gateway` | Value of the heritage attribute |
 | Hostname allowlist default | allow | `deny` makes namespaces without `allowed-hostnames` publish nothing |
 | Watched namespaces | all | Comma-separated list to limit the controller |
 | Switch timeout, switch grace period | `5m`, `30s` | See [Switching](#switching-between-shared-and-dedicated) |
@@ -476,8 +478,11 @@ wildcard CNAME), marked twice:
 
 - a TXT record named `<prefix>.<hostname>` (for `*.<domain>`:
   `<prefix>-wildcard.<domain>`) with content
-  `heritage=cf-tunnel-gateway,owner=<owner ID>,gateway=<namespace>/<name>`.
-  A record is ours only if this TXT record matches;
+  `heritage=cf-tunnel-gateway,owner=<owner ID>,gateway=<namespace>/<name>`
+  (the three attribute names and the heritage value are configurable;
+  changing them later makes existing records look foreign). The TXT record
+  cannot share the CNAME's name, since a CNAME excludes other records at
+  its name. A record is ours only if this TXT record matches;
 - a comment on the CNAME for humans.
 
 An existing CNAME that is not ours is never overwritten: the conflict is

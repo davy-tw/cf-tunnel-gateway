@@ -55,9 +55,6 @@ type dnsState struct {
 	Message string
 }
 
-// heritage is the fixed part of every ownership TXT record.
-const heritage = "heritage=cf-tunnel-gateway"
-
 // txtName is the name of a hostname's ownership TXT record.
 func txtName(prefix, host string) string {
 	if rest, ok := strings.CutPrefix(host, "*."); ok {
@@ -67,23 +64,26 @@ func txtName(prefix, host string) string {
 }
 
 // ownerContent is the TXT content marking a record as this Gateway's.
+// The attribute names and the heritage value are configurable.
 func (s *dnsSyncer) ownerContent() string {
-	return fmt.Sprintf("%s,owner=%s,gateway=%s", heritage, s.Config.DNSOwnerID, s.Gateway)
+	k := s.Config.DNSTXTKeys
+	return fmt.Sprintf("%s=%s,%s=%s,%s=%s", k.Heritage, s.Config.DNSTXTHeritage, k.Owner, s.Config.DNSOwnerID, k.Gateway, s.Gateway)
 }
 
 // txtOwner parses an ownership TXT record's content into owner ID and
 // Gateway. ok is false for foreign records.
-func txtOwner(content string) (owner, gateway string, ok bool) {
+func (s *dnsSyncer) txtOwner(content string) (owner, gateway string, ok bool) {
 	content = strings.Trim(content, `"`)
 	fields := map[string]string{}
 	for _, f := range strings.Split(content, ",") {
 		k, v, _ := strings.Cut(strings.TrimSpace(f), "=")
 		fields[k] = v
 	}
-	if "heritage="+fields["heritage"] != heritage {
+	k := s.Config.DNSTXTKeys
+	if h, found := fields[k.Heritage]; !found || h != s.Config.DNSTXTHeritage {
 		return "", "", false
 	}
-	return fields["owner"], fields["gateway"], true
+	return fields[k.Owner], fields[k.Gateway], true
 }
 
 func (s *dnsSyncer) comment() string {
@@ -180,7 +180,7 @@ func (s *dnsSyncer) ensure(ctx context.Context, h translate.Hostname) (dnsState,
 	var txt *cloudflare.DNSRecord
 	otherGateway := ""
 	for i := range txts {
-		owner, gw, ok := txtOwner(txts[i].Content)
+		owner, gw, ok := s.txtOwner(txts[i].Content)
 		if !ok || owner != s.Config.DNSOwnerID {
 			continue
 		}
@@ -260,7 +260,7 @@ func (s *dnsSyncer) remove(ctx context.Context, host string) error {
 	}
 	var owned []cloudflare.DNSRecord
 	for _, t := range txts {
-		if owner, gw, ok := txtOwner(t.Content); ok && owner == s.Config.DNSOwnerID && gw == s.Gateway {
+		if owner, gw, ok := s.txtOwner(t.Content); ok && owner == s.Config.DNSOwnerID && gw == s.Gateway {
 			owned = append(owned, t)
 		}
 	}

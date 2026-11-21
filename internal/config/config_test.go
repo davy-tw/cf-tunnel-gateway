@@ -20,7 +20,8 @@ func TestDefaults(t *testing.T) {
 	if c.SharedScope != ScopeNamespace || c.SharedNamespace != "cf-tunnel-gateway-system" || !c.IngressEnabled || !c.ServiceEnabled {
 		t.Errorf("shared: %+v", c)
 	}
-	if c.DNSPolicy != DNSPolicySync || c.DNSOwnerID != DefaultInstance || c.DNSTXTPrefix != "_cf-tunnel-gateway" {
+	if c.DNSPolicy != DNSPolicySync || c.DNSOwnerID != DefaultInstance || c.DNSTXTPrefix != "_cf-tunnel-gateway" ||
+		c.DNSTXTKeys != (TXTKeys{"heritage", "owner", "gateway"}) || c.DNSTXTHeritage != "cf-tunnel-gateway" {
 		t.Errorf("dns: %+v", c)
 	}
 	if c.SwitchTimeout != 5*time.Minute || c.SwitchGrace != 30*time.Second || c.TCPMode || c.AccessApps || c.DenyUnlistedHostnames {
@@ -57,6 +58,10 @@ func TestInvalid(t *testing.T) {
 		"instance":    {EnvInstance: "A_B"},
 		"txt prefix":  {EnvDNSTXTPrefix: "a.b"},
 		"base domain": {EnvBaseDomain: "localhost"},
+		"txt key":     {EnvDNSTXTOwnerKey: "own er"},
+		"txt key dup": {EnvDNSTXTGatewayKey: "owner"},
+		"txt key sep": {EnvDNSTXTHeritageKey: "a=b"},
+		"heritage":    {EnvDNSTXTHeritage: "a,b"},
 		"allowlist":   {EnvHostnameDefault: "maybe"},
 	} {
 		if _, err := Load(env(m)); err == nil {

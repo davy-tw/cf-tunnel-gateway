@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -140,6 +141,10 @@ type Config struct {
 	DNSOwnerID   string
 	DNSTXTPrefix string
 	DNSComment   string
+	// DNSTXTKeys names the attributes of the ownership TXT records, and
+	// DNSTXTHeritage is the heritage attribute's value.
+	DNSTXTKeys     TXTKeys
+	DNSTXTHeritage string
 	// DenyUnlistedHostnames makes namespaces without an allowed-hostnames
 	// annotation publish nothing.
 	DenyUnlistedHostnames bool
@@ -184,6 +189,10 @@ const (
 	EnvDNSOwnerID        = "DNS_OWNER_ID"
 	EnvDNSTXTPrefix      = "DNS_TXT_PREFIX"
 	EnvDNSComment        = "DNS_COMMENT"
+	EnvDNSTXTHeritage    = "DNS_TXT_HERITAGE"
+	EnvDNSTXTHeritageKey = "DNS_TXT_HERITAGE_KEY"
+	EnvDNSTXTOwnerKey    = "DNS_TXT_OWNER_KEY"
+	EnvDNSTXTGatewayKey  = "DNS_TXT_GATEWAY_KEY"
 	EnvHostnameDefault   = "HOSTNAME_ALLOWLIST_DEFAULT"
 	EnvWatchNamespaces   = "WATCH_NAMESPACES"
 	EnvSwitchTimeout     = "SWITCH_TIMEOUT"
@@ -194,6 +203,14 @@ const (
 	EnvProbeAddr         = "HEALTH_PROBE_BIND_ADDRESS"
 	EnvNamespace         = "POD_NAMESPACE"
 )
+
+// TXTKeys names the attributes of an ownership TXT record.
+type TXTKeys struct {
+	Heritage, Owner, Gateway string
+}
+
+// txtKey matches a usable TXT attribute name.
+var txtKey = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
 
 // FromEnv reads the configuration from the process environment.
 func FromEnv() (*Config, error) { return Load(os.Getenv) }
@@ -259,13 +276,19 @@ func Load(getenv func(string) string) (*Config, error) {
 		DNSOwnerID:        get(EnvDNSOwnerID, instance),
 		DNSTXTPrefix:      get(EnvDNSTXTPrefix, "_cf-tunnel-gateway"),
 		DNSComment:        get(EnvDNSComment, "managed by cf-tunnel-gateway"),
-		SwitchTimeout:     duration(EnvSwitchTimeout, 5*time.Minute),
-		SwitchGrace:       duration(EnvSwitchGrace, 30*time.Second),
-		ConnectorImage:    get(EnvConnectorImage, DefaultConnectorImage),
-		ClusterDomain:     get(EnvClusterDomain, "cluster.local"),
-		MetricsAddr:       get(EnvMetricsAddr, ":8080"),
-		ProbeAddr:         get(EnvProbeAddr, ":8081"),
-		Namespace:         ns,
+		DNSTXTKeys: TXTKeys{
+			Heritage: get(EnvDNSTXTHeritageKey, "heritage"),
+			Owner:    get(EnvDNSTXTOwnerKey, "owner"),
+			Gateway:  get(EnvDNSTXTGatewayKey, "gateway"),
+		},
+		DNSTXTHeritage: get(EnvDNSTXTHeritage, "cf-tunnel-gateway"),
+		SwitchTimeout:  duration(EnvSwitchTimeout, 5*time.Minute),
+		SwitchGrace:    duration(EnvSwitchGrace, 30*time.Second),
+		ConnectorImage: get(EnvConnectorImage, DefaultConnectorImage),
+		ClusterDomain:  get(EnvClusterDomain, "cluster.local"),
+		MetricsAddr:    get(EnvMetricsAddr, ":8080"),
+		ProbeAddr:      get(EnvProbeAddr, ":8081"),
+		Namespace:      ns,
 	}
 	switch v := get(EnvHostnameDefault, "allow"); v {
 	case "allow":
@@ -307,6 +330,22 @@ func Load(getenv func(string) string) (*Config, error) {
 	}
 	if e := validation.IsDNS1123Subdomain(strings.TrimPrefix(c.DNSTXTPrefix, "_")); len(e) > 0 || strings.Contains(c.DNSTXTPrefix, ".") {
 		errs = append(errs, fmt.Sprintf("%s: %q must be a single DNS label (a leading underscore is allowed)", EnvDNSTXTPrefix, c.DNSTXTPrefix))
+	}
+	seen := map[string]string{}
+	for _, k := range []struct{ env, v string }{
+		{EnvDNSTXTHeritageKey, c.DNSTXTKeys.Heritage},
+		{EnvDNSTXTOwnerKey, c.DNSTXTKeys.Owner},
+		{EnvDNSTXTGatewayKey, c.DNSTXTKeys.Gateway},
+	} {
+		if !txtKey.MatchString(k.v) {
+			errs = append(errs, fmt.Sprintf("%s: %q must be letters, digits, '-', '_', '.' or '/'", k.env, k.v))
+		} else if other, ok := seen[k.v]; ok {
+			errs = append(errs, fmt.Sprintf("%s: %q is already used by %s", k.env, k.v, other))
+		}
+		seen[k.v] = k.env
+	}
+	if c.DNSTXTHeritage == "" || strings.ContainsAny(c.DNSTXTHeritage, ",=\" \t\n") {
+		errs = append(errs, fmt.Sprintf("%s: %q must be non-empty without ',', '=', quotes or spaces", EnvDNSTXTHeritage, c.DNSTXTHeritage))
 	}
 	if c.BaseDomain != "" {
 		if e := validation.IsDNS1123Subdomain(c.BaseDomain); len(e) > 0 || !strings.Contains(c.BaseDomain, ".") {

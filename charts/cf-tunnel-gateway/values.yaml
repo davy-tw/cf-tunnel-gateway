@@ -85,6 +85,13 @@ dns:
   ownerId: ""
   txtPrefix: ""
   comment: ""
+  # Ownership TXT content is <heritage>=<txtHeritage>,<owner>=<ownerId>,<gateway>=<ns>/<name>.
+  # Changing any of these makes existing records look foreign.
+  txtHeritage: ""
+  txtKeys:
+    heritage: ""
+    owner: ""
+    gateway: ""
 
 switch:
   timeout: ""

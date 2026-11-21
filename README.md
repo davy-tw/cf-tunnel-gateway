@@ -84,6 +84,7 @@ The controller reads environment variables (loaded from the Secret
 | `ACCESS_APPLICATIONS` | `false` | Create a deny-all Access application per TCP hostname |
 | `DNS_POLICY` | `sync` | `sync` or `upsert-only` (records are never deleted) |
 | `DNS_OWNER_ID`, `DNS_TXT_PREFIX`, `DNS_COMMENT` | instance name, `_cf-tunnel-gateway`, `managed by cf-tunnel-gateway` | DNS ownership records |
+| `DNS_TXT_HERITAGE_KEY`, `DNS_TXT_OWNER_KEY`, `DNS_TXT_GATEWAY_KEY`, `DNS_TXT_HERITAGE` | `heritage`, `owner`, `gateway`, `cf-tunnel-gateway` | Attribute names and heritage value in the ownership TXT records |
 | `WATCH_NAMESPACES` | all | Comma-separated namespaces to watch |
 | `SWITCH_TIMEOUT`, `SWITCH_GRACE_PERIOD` | `5m`, `30s` | Moving an object between Gateways ([design](docs/design.md#switching-between-shared-and-dedicated)) |
 | `CLOUDFLARED_IMAGE` | pinned `cloudflare/cloudflared` tag | Connector image |

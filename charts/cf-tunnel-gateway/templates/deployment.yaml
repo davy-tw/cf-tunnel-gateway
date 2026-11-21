@@ -22,6 +22,10 @@
   "DNS_OWNER_ID" .Values.dns.ownerId
   "DNS_TXT_PREFIX" .Values.dns.txtPrefix
   "DNS_COMMENT" .Values.dns.comment
+  "DNS_TXT_HERITAGE" .Values.dns.txtHeritage
+  "DNS_TXT_HERITAGE_KEY" .Values.dns.txtKeys.heritage
+  "DNS_TXT_OWNER_KEY" .Values.dns.txtKeys.owner
+  "DNS_TXT_GATEWAY_KEY" .Values.dns.txtKeys.gateway
   "SWITCH_TIMEOUT" .Values.switch.timeout
   "SWITCH_GRACE_PERIOD" .Values.switch.gracePeriod
   "CLOUDFLARED_IMAGE" .Values.connector.image
