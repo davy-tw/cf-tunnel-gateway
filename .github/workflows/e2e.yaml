@@ -1,17 +1,17 @@
 name: e2e
 # Runs test/e2e on kind (upstream Kubernetes) and on k3s through k3d, with
 # the controller installed from the chart and talking to a fake Cloudflare
-# API in the cluster (see `make e2e-kind` and `make e2e-k3d`).
+# API in the cluster (see `make e2e-kind` and `make e2e-k3d`). Pushes to
+# main and tags run it from the release workflow.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
   workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: e2e-${{ github.ref }}
-  cancel-in-progress: true
+  group: e2e-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   e2e:
     name: e2e (${{ matrix.provider }}, Gateway API ${{ matrix.gateway-api }})

@@ -1,8 +1,9 @@
 name: ci
+# Pushes to main and tags run these checks from the release workflow, which
+# publishes only once they pass.
 on:
-  push:
-    branches: [main]
   pull_request:
+  workflow_call:
 permissions:
   contents: read
 jobs:
