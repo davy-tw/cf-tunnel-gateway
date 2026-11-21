@@ -227,6 +227,37 @@ func (s *Server) Calls() []string {
 	return append([]string(nil), s.calls...)
 }
 
+// StatePath serves the fake's state as JSON (State), for tests that run
+// the fake in a cluster.
+const StatePath = "/_fake/state"
+
+// State is what StatePath returns.
+type State struct {
+	Tunnels []cloudflare.Tunnel                 `json:"tunnels"`
+	Configs map[string]*cloudflare.TunnelConfig `json:"configs"`
+	Records []cloudflare.DNSRecord              `json:"records"`
+	Apps    []cloudflare.AccessApp              `json:"apps"`
+}
+
+func (s *Server) serveState(w http.ResponseWriter) {
+	st := State{Tunnels: s.Tunnels(), Configs: map[string]*cloudflare.TunnelConfig{}, Apps: s.AccessApps()}
+	for _, t := range st.Tunnels {
+		st.Configs[t.ID] = s.Config(t.ID)
+	}
+	s.mu.Lock()
+	var zoneIDs []string
+	for id := range s.zones {
+		zoneIDs = append(zoneIDs, id)
+	}
+	s.mu.Unlock()
+	sort.Strings(zoneIDs)
+	for _, id := range zoneIDs {
+		st.Records = append(st.Records, s.Records(id)...)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(st)
+}
+
 // ---- HTTP ----
 
 type info struct {
@@ -282,6 +313,10 @@ func forbidden(w http.ResponseWriter) {
 
 // ServeHTTP implements http.Handler.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == StatePath {
+		s.serveState(w)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	path := strings.TrimPrefix(r.URL.Path, "/client/v4")
