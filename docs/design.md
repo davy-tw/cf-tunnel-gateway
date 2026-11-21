@@ -253,7 +253,8 @@ intersection as the Gateway API specifies.
 
 ### Connector token Secret
 
-The connector token is stored in Secret `<gateway>-cloudflared-token`, owned
+The connector token is stored in Secret `<gateway>-cloudflared-token` (a
+long Gateway name is shortened with a hash to fit), owned
 by the Gateway, under `TUNNEL_TOKEN`, the variable `cloudflared` reads, so
 the Secret can be loaded wholesale as environment variables. The name is a
 documented contract, also published in the Gateway's `token-secret`
@@ -263,7 +264,8 @@ it follows token rotation.
 
 ### Connector Deployment
 
-Deployment `<gateway>-cloudflared`, owned by the Gateway (`-cloudflared`
+Deployment `<gateway>-cloudflared` (shortened with a hash when needed so
+its Pod names fit), owned by the Gateway (`-cloudflared`
 keeps it from colliding with an application's own Deployment, since
 generated Gateways are named after Services and Ingresses):
 

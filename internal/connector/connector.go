@@ -44,11 +44,31 @@ const (
 )
 
 // DeploymentName is the connector Deployment (and PodDisruptionBudget) of
-// a Gateway.
-func DeploymentName(gateway string) string { return gateway + "-cloudflared" }
+// a Gateway. It leaves room for the ReplicaSet and Pod name suffixes.
+func DeploymentName(gateway string) string {
+	return boundedName(gateway, "-cloudflared", maxDeploymentName)
+}
 
 // SecretName is the connector token Secret of a Gateway.
-func SecretName(gateway string) string { return gateway + "-cloudflared-token" }
+func SecretName(gateway string) string {
+	return boundedName(gateway, "-cloudflared-token", maxObjectName)
+}
+
+const (
+	maxObjectName = 253
+	// A Pod is named <deployment>-<10 character hash>-<5 characters>.
+	maxDeploymentName = maxObjectName - 17
+)
+
+// boundedName is base+suffix, with base shortened and a hash of it added
+// when the result would be longer than max.
+func boundedName(base, suffix string, max int) string {
+	if len(base)+len(suffix) <= max {
+		return base + suffix
+	}
+	h := sha256.Sum256([]byte(base))
+	return strings.TrimRight(base[:max-len(suffix)-11], "-.") + "-" + hex.EncodeToString(h[:])[:10] + suffix
+}
 
 // LabelValue fits a name into a label value, with a hash when too long.
 func LabelValue(name string) string {

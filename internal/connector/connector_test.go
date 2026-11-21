@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 func TestParseParams(t *testing.T) {
@@ -95,5 +96,31 @@ func TestLabelValue(t *testing.T) {
 	long := strings.Repeat("a", 80)
 	if v := LabelValue(long); len(v) > 63 || v == LabelValue(long+"b") {
 		t.Errorf("%q", v)
+	}
+}
+
+func TestNamesFitKubernetesLimits(t *testing.T) {
+	if got := DeploymentName("demo"); got != "demo-cloudflared" {
+		t.Errorf("DeploymentName = %q", got)
+	}
+	if got := SecretName("demo"); got != "demo-cloudflared-token" {
+		t.Errorf("SecretName = %q", got)
+	}
+	long := strings.Repeat("a", 240)
+	other := strings.Repeat("a", 239) + "b"
+	for _, f := range []func(string) string{DeploymentName, SecretName} {
+		a, b := f(long), f(other)
+		if len(a) > 253 || len(b) > 253 {
+			t.Errorf("names too long: %d, %d", len(a), len(b))
+		}
+		if a == b {
+			t.Errorf("names of different Gateways collide: %q", a)
+		}
+		if errs := validation.IsDNS1123Subdomain(a); len(errs) > 0 {
+			t.Errorf("%q: %v", a, errs)
+		}
+	}
+	if n := len(DeploymentName(long)); n > maxDeploymentName {
+		t.Errorf("Deployment name leaves no room for Pod names: %d", n)
 	}
 }
