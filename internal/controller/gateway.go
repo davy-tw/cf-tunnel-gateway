@@ -171,12 +171,23 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 	if !pol.classAllowed(gc.Name) {
 		msg := fmt.Sprintf("namespace %s does not allow GatewayClass %q (annotation %s)", gw.Namespace, gc.Name, config.AnnotationAllowedGatewayClasses)
 		res := &translate.Result{AcceptedReason: ReasonNotAllowed, AcceptedMessage: msg}
-		return ctrl.Result{}, errors.Join(
+		relErr := r.release(ctx, gw)
+		var blocked *pendingError
+		if errors.As(relErr, &blocked) {
+			relErr = nil
+		}
+		if err := errors.Join(
 			r.withdraw(ctx, gw),
-			r.release(ctx, gw),
+			relErr,
 			r.writeRouteStatus(ctx, gw, rs, res, nil),
 			r.writeGatewayStatus(ctx, gw, res, nil, &pendingError{msg}, &outcome{}),
-		)
+		); err != nil {
+			return ctrl.Result{}, err
+		}
+		if blocked != nil {
+			return ctrl.Result{RequeueAfter: pendingRequeue}, nil
+		}
+		return ctrl.Result{}, nil
 	}
 
 	creds, cerr := r.gatewayCredentials(ctx, gw)
@@ -411,9 +422,10 @@ func recordedDNSHostnames(rec map[string]string, gw *gwv1.Gateway) []string {
 }
 
 // release gives up the hostnames of a Gateway whose namespace no longer
-// allows its class, which its author cannot undo: the claim is dropped
-// and, with the sync policy, its DNS records are removed. (A Gateway that
-// is only not accepted keeps both.)
+// allows its class, which its author cannot undo: with the sync policy
+// its DNS records are removed, and then the claim is dropped. Without
+// usable credentials both are kept and a pendingError is returned. (A
+// Gateway that is only not accepted keeps both.)
 func (r *GatewayReconciler) release(ctx context.Context, gw *gwv1.Gateway) error {
 	rec, err := r.recorded(ctx, gw)
 	if err != nil {
@@ -427,15 +439,19 @@ func (r *GatewayReconciler) release(ctx context.Context, gw *gwv1.Gateway) error
 			return err
 		}
 		if ip != nil {
-			creds = r.fallbackCredentials()
-		}
-		if creds != nil {
-			s := &dnsSyncer{CF: r.CF, Config: r.Config, Token: creds.DNSToken, Gateway: gatewayKey(gw)}
-			if err := s.RemoveAll(ctx, hosts); err != nil {
-				return err
+			if creds = r.fallbackCredentials(); creds == nil {
+				// Keep the claim until the records are gone, so that no
+				// other Gateway runs into them.
+				r.event(gw, corev1.EventTypeWarning, "CleanupBlocked",
+					"cannot remove DNS records in Cloudflare (%s); fix the credentials", ip.msg)
+				return &pendingError{ip.msg}
 			}
-			ann[config.AnnotationDNSHostnames] = ""
 		}
+		s := &dnsSyncer{CF: r.CF, Config: r.Config, Token: creds.DNSToken, Gateway: gatewayKey(gw)}
+		if err := s.RemoveAll(ctx, hosts); err != nil {
+			return err
+		}
+		ann[config.AnnotationDNSHostnames] = ""
 	}
 	return r.setAnnotations(ctx, gw, ann)
 }
@@ -481,7 +497,13 @@ func (r *GatewayReconciler) claimedHostnames(ctx context.Context, gw *gwv1.Gatew
 	if err != nil {
 		return nil, err
 	}
-	own := parseHostnames(recs[gw.UID][config.AnnotationHostnames])
+	// This Gateway's own record is read from the API server: the cache
+	// may not have its latest write yet.
+	mine, err := r.recorded(ctx, gw)
+	if err != nil {
+		return nil, err
+	}
+	own := parseHostnames(mine[config.AnnotationHostnames])
 	claimed := map[string]translate.Claim{}
 	classes := map[string]bool{}
 	sort.Slice(list.Items, func(i, j int) bool { return olderGateway(&list.Items[i], &list.Items[j]) })

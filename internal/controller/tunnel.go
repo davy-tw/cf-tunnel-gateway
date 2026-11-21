@@ -148,7 +148,9 @@ func (r *GatewayReconciler) boundElsewhere(ctx context.Context, gw *gwv1.Gateway
 	if err := r.List(ctx, &list); err != nil {
 		return "", err
 	}
-	recs, err := r.records(ctx)
+	// Read from the API server, so that two Gateways binding a tunnel in
+	// quick succession see each other.
+	recs, err := r.listRecords(ctx, r.reader())
 	if err != nil {
 		return "", err
 	}
