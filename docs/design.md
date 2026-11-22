@@ -22,6 +22,7 @@ so all three share one data plane driven by Gateway API.
 | GatewayClass | Points at Cloudflare credentials, validated against the Cloudflare API |
 | Gateway | One remotely-managed Cloudflare Tunnel, one connector token Secret, one `cloudflared` Deployment |
 | HTTPRoute, GRPCRoute, TCPRoute | Ingress rules in the tunnel's remote configuration, plus proxied DNS CNAME records for their hostnames |
+| ListenerSet | More listeners on a Gateway's tunnel, when the Gateway allows it (see [ListenerSets](#listenersets)) |
 
 The design is built only on public interfaces: the Kubernetes Gateway API
 specification, the Kubernetes core APIs, Cloudflare's public API
@@ -81,14 +82,16 @@ Annotations the controller writes:
 | `dns-hostnames` | Gateway | Hostnames whose DNS records the Gateway may own, for cleanup |
 | `grpc-notified` | Gateway | The gRPC zone-setting event was emitted |
 | `instance` | IngressClass | Installation that shipped the class |
+| `hostname-owners` | Gateway | The owner within the Gateway (the Gateway or one ListenerSet) of each hostname it publishes or a ListenerSet listener declares |
+| `listener-sets` | Gateway | ListenerSets whose status the Gateway wrote, to release one that moves away |
 
 All annotation keys are prefixed with `cf-tunnel-gateway.davy.tw/`.
 
 Anyone who can edit a Gateway or route can also write the annotations the
 controller writes. The Gateway annotations that decide what the controller
-may delete or which Gateway keeps a hostname (`tunnel`, `previous-tunnel`,
-`hostnames`, `dns-hostnames`) are therefore kept in a record that tenants
-cannot write: a ConfigMap `<instance>-gateway-<Gateway UID>` in the
+may delete or which Gateway or ListenerSet keeps a hostname (`tunnel`,
+`previous-tunnel`, `hostnames`, `dns-hostnames`, `hostname-owners`,
+`listener-sets`) are therefore kept in a record that tenants cannot write: a ConfigMap `<instance>-gateway-<Gateway UID>` in the
 controller's namespace, deleted with the Gateway (records whose Gateway
 is gone are also swept at start and every hour). The Gateway's
 annotations only mirror it for people to read; values written or restored
@@ -167,8 +170,9 @@ serve some kinds only at `v1beta1` or `v1alpha2` are not supported.
 At startup the controller checks which kinds are served. If GatewayClass,
 Gateway or HTTPRoute is missing, it logs that Gateway API v1.6.0 or newer is
 needed and keeps retrying instead of crash-looping. A missing GRPCRoute,
-TCPRoute or ReferenceGrant disables that feature with one log line (without
-ReferenceGrant, cross-namespace backends are never permitted). The
+TCPRoute, ReferenceGrant or ListenerSet disables that feature with one log
+line (without ReferenceGrant, cross-namespace backends are never permitted;
+without ListenerSet, ListenerSets are not watched). The
 controller rechecks every minute, so installing TCPRoute later enables TCP
 mode without a restart.
 
@@ -378,6 +382,88 @@ Gateways carry the finalizer. On deletion the controller sets
 
 Any Cloudflare error requeues and retries. A Gateway that moves to another
 controller's class is cleaned up the same way.
+
+## ListenerSets
+
+A ListenerSet adds listeners to the Gateway its `parentRef` names, so that
+a team can publish its own hostnames on a Gateway (and its tunnel and
+connector) without editing the Gateway. Its listeners are served by that
+Gateway's tunnel: there is no tunnel per ListenerSet. Its hostnames are the
+Gateway's to Cloudflare: their DNS records and ownership TXT records name
+the Gateway, and the Gateway's claims against other Gateways cover them.
+
+- A Gateway allows no ListenerSet unless its `spec.allowedListeners` says
+  so: `from: Same` (the Gateway's namespace), `All`, or `Selector`
+  (namespace labels). Others get `Accepted=False` and `Programmed=False`
+  with reason `NotAllowed`, and their listeners are not used. Generated
+  (shared and dedicated) Gateways allow none.
+- Listeners follow the [Gateway's listener rules](#listeners) (`HTTP` on 80,
+  `HTTPS` on 443, `TCP` in TCP mode).
+- Listeners are merged in the Gateway API precedence order: the Gateway's
+  own, then ListenerSets oldest first, then by namespace/name. A ListenerSet
+  listener that conflicts with an earlier one on the same port (another
+  protocol, or the same hostname, an empty one included) gets
+  `Accepted=False`, `Conflicted=True` and `Programmed=False` with reason
+  `ProtocolConflict` or `HostnameConflict`, and the earlier one keeps
+  serving. The Gateway's own listeners always keep their ports.
+- **A hostname belongs to one owner of the Gateway**: the Gateway or one
+  ListenerSet. Cloudflare serves a hostname on all its ports and every path
+  goes through the same DNS record, so the unit a tenant must not take or
+  extend is the whole hostname, not a port or a path:
+  - The hostnames of the Gateway's own listeners are the Gateway's.
+  - Otherwise the first owner to use a hostname keeps it: through a
+    listener hostname of an accepted ListenerSet listener (declared even
+    before a route uses it), or through a route. Owners are recorded in
+    the Gateway's record (`hostname-owners`), so they survive restarts and
+    tenants cannot rewrite them. When owners first appear in the same
+    reconcile, precedence order decides (the Gateway's routes first, then
+    ListenerSets oldest first), which is what the Gateway API asks for. It
+    differs from the Gateway API only when a ListenerSet is edited later to
+    name a hostname another owner already holds: it does not take it, even
+    when it is older.
+  - A ListenerSet listener whose hostname belongs to another owner gets
+    `HostnameConflict`, on any port and protocol. A route that would
+    publish a hostname of another owner (adding a path included) gets
+    `Accepted=False` with reason `Conflicted` on that parent, through
+    whichever parentRef; a route attached to both the Gateway and a
+    ListenerSet is judged separately for each.
+  - A wildcard hostname a ListenerSet holds also covers the names below
+    it against other ListenerSets and routes of other owners. The
+    Gateway's own listeners may still name them.
+  - A ListenerSet keeps its hostnames while it exists and the Gateway
+    allows it, also while none of its listeners is valid (so a failed edit
+    does not give them away). They are released when it is deleted
+    (recreating it makes a new owner), moves to another Gateway, or is no
+    longer allowed by `allowedListeners`. A ListenerSet that moves to
+    another Gateway therefore goes offline until the old Gateway has
+    released its hostnames and DNS records.
+- `allowed-hostnames` applies to the ListenerSet's namespace: a listener
+  hostname it does not allow gets `Accepted=False` with reason
+  `HostnameNotAllowed`, and a route attached through a ListenerSet must
+  publish hostnames allowed in both its own namespace and the ListenerSet's.
+- A ListenerSet is `Accepted=True` when at least one of its listeners is
+  valid (reason `ListenersNotValid` when some are not), and
+  `Accepted=False` with `ListenersNotValid` when none is, or with
+  `ParentNotAccepted` when the Gateway is not accepted. `Programmed`
+  follows the Gateway's (`ParentNotProgrammed` until then). The Gateway's
+  `status.attachedListenerSets` counts the accepted ones; its
+  `status.listeners` lists only its own listeners, and each ListenerSet
+  lists its own.
+- Routes attach to ListenerSet listeners only through a parentRef of kind
+  `ListenerSet` (optionally with `sectionName` or `port`), and to the
+  Gateway's own listeners only through a parentRef to the Gateway. The
+  route's status entry names the parent it used. `allowedRoutes` with
+  `from: Same` on a ListenerSet listener means the ListenerSet's namespace.
+- When the Gateway is deleted, not allowed its class, or its GatewayClass
+  disappears, its ListenerSets get `Accepted=False` with reason
+  `ParentNotAccepted`. A ListenerSet whose `parentRef` moves to a Gateway
+  that does not exist also gets `ParentNotAccepted`, and one that moves to
+  another controller's Gateway goes back to `Unknown`/`Pending`, unless
+  its status was already written for its new generation. When the Gateway
+  itself moves to another controller's class, its ListenerSets go back to
+  `Unknown`/`Pending` once its cleanup is done.
+- Listener `certificateRefs` are ignored on ListenerSets too, so no
+  ReferenceGrant is checked for them.
 
 ## Routes
 
@@ -603,7 +689,11 @@ hostnames or single tunnels, so isolation is layered:
    moves too; without a record of the owner's routes, nothing moves.
 5. `tunnel-id` needs the namespace's `allow-tunnel-id: "true"`, so that a
    namespace cannot take over a tunnel it was not given.
-6. Namespace annotations are the policy surface because tenants normally
+6. A Gateway that allows ListenerSets delegates hostnames to their
+   namespaces, but a hostname belongs to one owner within the Gateway
+   (see [ListenerSets](#listenersets)): an allowed namespace cannot take or
+   extend a hostname of the Gateway or of another ListenerSet.
+7. Namespace annotations are the policy surface because tenants normally
    cannot edit their Namespace. Some multi-tenancy tools let them; this
    policy is only as strong as that RBAC. A policy resource is on the
    roadmap.
@@ -668,8 +758,8 @@ with the hostname.
 
 ## RBAC
 
-Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes
-(read, write, status, finalizers), ReferenceGrants (read), Secrets (read and
+Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes,
+ListenerSets (read, write, status, finalizers), ReferenceGrants (read), Secrets (read and
 write; Secrets are cached as metadata only, plus the controller's own token
 Secrets), ConfigMaps (read; written only in its own namespace, for the
 Gateway records), Services and their status and finalizers, Ingresses
