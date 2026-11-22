@@ -65,6 +65,7 @@ rules:
   - grpcroutes
   - tcproutes
   - referencegrants
+  - listenersets
   verbs:
   - get
   - list
@@ -81,6 +82,7 @@ rules:
   - httproutes/status
   - grpcroutes/status
   - tcproutes/status
+  - listenersets/status
   verbs:
   - get
   - update

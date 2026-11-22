@@ -11,6 +11,7 @@ rules:
       - grpcroutes
       - tcproutes
       - referencegrants
+      - listenersets
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [gateway.networking.k8s.io]
     resources:
@@ -19,6 +20,7 @@ rules:
       - httproutes/status
       - grpcroutes/status
       - tcproutes/status
+      - listenersets/status
     verbs: [get, update, patch]
   # Owner references with blockOwnerDeletion need update on the owner's
   # finalizers (OwnerReferencesPermissionEnforcement).
