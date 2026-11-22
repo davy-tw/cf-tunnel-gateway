@@ -1,0 +1,30 @@
+# A gRPC service. cloudflared speaks HTTP/2 only to TLS origins, so the
+# backend serves TLS and says so with appProtocol: https (its certificate is
+# not verified). Enable gRPC in the zone's Network settings in Cloudflare.
+apiVersion: v1
+kind: Service
+metadata:
+  name: greeter
+  namespace: cf-demo
+spec:
+  selector: {app: greeter}
+  ports:
+    - name: grpc
+      port: 8443
+      appProtocol: https
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: greeter
+  namespace: cf-demo
+spec:
+  parentRefs:
+    - name: demo
+  hostnames: ["grpc.example.com"]
+  rules:
+    - matches:
+        - method: {service: helloworld.Greeter}
+      backendRefs:
+        - name: greeter
+          port: 8443

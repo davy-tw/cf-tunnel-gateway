@@ -1,0 +1,127 @@
+{{- $env := dict
+  "INSTANCE_NAME" .Values.instance
+  "CLOUDFLARE_API_URL" .Values.cloudflare.apiUrl
+  "GATEWAY_CONTROLLER_NAME" .Values.controller.name
+  "GATEWAY_CLASS" .Values.controller.gatewayClass
+  "INGRESS_CLASS" .Values.controller.ingressClass
+  "LOAD_BALANCER_CLASS" .Values.controller.loadBalancerClass
+  "INGRESS_ENABLED" (toString .Values.controller.ingress.enabled)
+  "LOAD_BALANCER_ENABLED" (toString .Values.controller.loadBalancer.enabled)
+  "WATCH_NAMESPACES" .Values.controller.watchNamespaces
+  "CLUSTER_DOMAIN" .Values.controller.clusterDomain
+  "SHARED_GATEWAY_SCOPE" .Values.sharedGateway.scope
+  "SHARED_GATEWAY_NAME" .Values.sharedGateway.name
+  "SHARED_GATEWAY_NAMESPACE" .Values.sharedGateway.namespace
+  "SHARED_GATEWAY_PARAMETERS" .Values.sharedGateway.parameters
+  "DEFAULT_BASE_DOMAIN" .Values.hostnames.baseDomain
+  "DEFAULT_HOSTNAME_TEMPLATE" .Values.hostnames.template
+  "HOSTNAME_ALLOWLIST_DEFAULT" .Values.hostnames.allowlistDefault
+  "TCP_MODE" (toString .Values.tcp.mode)
+  "ACCESS_APPLICATIONS" (toString .Values.tcp.accessApplications)
+  "DNS_POLICY" .Values.dns.policy
+  "DNS_OWNER_ID" .Values.dns.ownerId
+  "DNS_TXT_PREFIX" .Values.dns.txtPrefix
+  "DNS_COMMENT" .Values.dns.comment
+  "DNS_TXT_HERITAGE" .Values.dns.txtHeritage
+  "DNS_TXT_HERITAGE_KEY" .Values.dns.txtKeys.heritage
+  "DNS_TXT_OWNER_KEY" .Values.dns.txtKeys.owner
+  "DNS_TXT_GATEWAY_KEY" .Values.dns.txtKeys.gateway
+  "SWITCH_TIMEOUT" .Values.switch.timeout
+  "SWITCH_GRACE_PERIOD" .Values.switch.gracePeriod
+  "CLOUDFLARED_IMAGE" .Values.connector.image
+-}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cf-tunnel-gateway.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cf-tunnel-gateway.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "cf-tunnel-gateway.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cf-tunnel-gateway.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Restart when chart-managed credentials change.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "cf-tunnel-gateway.fullname" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- range $k, $v := $env }}
+            {{- if $v }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "cf-tunnel-gateway.secretName" . }}
+                optional: true
+          ports:
+            - name: metrics
+              containerPort: 8080
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

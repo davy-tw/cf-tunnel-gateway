@@ -1,0 +1,178 @@
+package ingress
+
+// Spike: how cloudflared applies a remotely-managed tunnel configuration
+// of the shape the controller generates. Run with:
+//
+//	go test ./ingress -run TestSpike -v
+
+import (
+	"crypto/tls"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"github.com/rs/zerolog"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+)
+
+func parseRemote(t *testing.T, js string) Ingress {
+	t.Helper()
+	var rc RemoteConfig
+	if err := json.Unmarshal([]byte(js), &rc); err != nil {
+		t.Fatalf("remote config rejected: %v\n%s", err, js)
+	}
+	log := zerolog.Nop()
+	if err := rc.Ingress.StartOrigins(&log, make(chan struct{})); err != nil {
+		t.Fatal(err)
+	}
+	return rc.Ingress
+}
+
+func TestSpikePaths(t *testing.T) {
+	js := `{"ingress":[
+	 {"hostname":"a.example.com","path":"^/exact$","service":"http://exact:1"},
+	 {"hostname":"a.example.com","path":"^/api(?:/.*)?$","service":"http://api:1"},
+	 {"hostname":"a.example.com","path":"^/a\\.b(?:/.*)?$","service":"http://dot:1"},
+	 {"hostname":"a.example.com","service":"http://root:1"},
+	 {"hostname":"*.example.com","service":"http://wild:1"},
+	 {"service":"http_status:404"}]}`
+	ing := parseRemote(t, js)
+	cases := []struct{ host, path, want string }{
+		{"a.example.com", "/exact", "http://exact:1"},
+		{"a.example.com", "/exact/", "http://root:1"},
+		{"a.example.com", "/api", "http://api:1"},
+		{"a.example.com", "/api/", "http://api:1"},
+		{"a.example.com", "/api/v1", "http://api:1"},
+		{"a.example.com", "/apix", "http://root:1"},
+		{"a.example.com", "/a.b/c", "http://dot:1"},
+		{"a.example.com", "/aXb/c", "http://root:1"},
+		{"a.example.com", "/api%2Fx", "http://api:1"},
+		{"b.example.com", "/", "http://wild:1"},
+		{"x.y.example.com", "/", "http://wild:1"},
+		{"example.com", "/", "http_status:404"},
+		{"other.org", "/", "http_status:404"},
+	}
+	for _, c := range cases {
+		u, _ := url.Parse("https://" + c.host + c.path)
+		r, _ := ing.FindMatchingRule(c.host, u)
+		got := r.Service.String()
+		status := "ok"
+		if got != c.want {
+			status = "MISMATCH"
+		}
+		t.Logf("%-8s %s%s -> %s (want %s)", status, c.host, c.path, got, c.want)
+		if got != c.want {
+			t.Fail()
+		}
+	}
+	// Query strings are not part of the matched path.
+	u, _ := url.Parse("https://a.example.com/exact?x=1")
+	if r, _ := ing.FindMatchingRule("a.example.com", u); r.Service.String() != "http://exact:1" {
+		t.Errorf("query string changed the match: %s", r.Service)
+	}
+}
+
+// countingServer counts accepted TCP connections.
+func countingServer(t *testing.T, h http.Handler) (*httptest.Server, *int64) {
+	var n int64
+	s := httptest.NewUnstartedServer(h)
+	s.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			atomic.AddInt64(&n, 1)
+		}
+	}
+	s.Start()
+	t.Cleanup(s.Close)
+	return s, &n
+}
+
+func TestSpikeConnectionReuse(t *testing.T) {
+	srv, n := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "ok") }))
+	for _, opt := range []string{``, `"keepAliveConnections":0`, `"keepAliveConnections":1`, `"keepAliveConnections":-1`} {
+		atomic.StoreInt64(n, 0)
+		js := fmt.Sprintf(`{"originRequest":{%s},"ingress":[{"hostname":"a.example.com","service":"%s"},{"service":"http_status:404"}]}`, opt, srv.URL)
+		ing := parseRemote(t, js)
+		svc := ing.Rules[0].Service.(*httpService)
+		for i := 0; i < 20; i++ {
+			req, _ := http.NewRequest("GET", "https://a.example.com/", nil)
+			resp, err := svc.RoundTrip(req)
+			if err != nil {
+				t.Fatalf("%s: %v", opt, err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+		t.Logf("originRequest {%s}: 20 sequential requests used %d origin connections", opt, atomic.LoadInt64(n))
+	}
+}
+
+func TestSpikeHostHeader(t *testing.T) {
+	var host, xfh string
+	srv, _ := countingServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { host, xfh = r.Host, r.Header.Get("X-Forwarded-Host") }))
+	js := fmt.Sprintf(`{"ingress":[{"hostname":"a.example.com","service":"%s","originRequest":{"httpHostHeader":"internal.example"}},{"service":"http_status:404"}]}`, srv.URL)
+	ing := parseRemote(t, js)
+	req, _ := http.NewRequest("GET", "https://a.example.com/", nil)
+	req.Host = "a.example.com"
+	resp, err := ing.Rules[0].Service.(*httpService).RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	t.Logf("origin saw Host=%q X-Forwarded-Host=%q", host, xfh)
+	if host != "internal.example" {
+		t.Error("httpHostHeader not applied")
+	}
+}
+
+func TestSpikeHTTP2Origins(t *testing.T) {
+	proto := func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, r.Proto) }
+	// Cleartext origin that accepts HTTP/2 prior knowledge (h2c) and HTTP/1.1.
+	h2cSrv, _ := countingServer(t, h2c.NewHandler(http.HandlerFunc(proto), &http2.Server{}))
+	// TLS origin offering h2.
+	tlsSrv := httptest.NewUnstartedServer(http.HandlerFunc(proto))
+	tlsSrv.EnableHTTP2 = true
+	tlsSrv.StartTLS()
+	defer tlsSrv.Close()
+
+	for _, c := range []struct{ name, service, opts string }{
+		{"http origin, http2Origin", h2cSrv.URL, `"http2Origin":true`},
+		{"https origin, http2Origin", tlsSrv.URL, `"http2Origin":true,"noTLSVerify":true`},
+		{"https origin, default", tlsSrv.URL, `"noTLSVerify":true`},
+	} {
+		js := fmt.Sprintf(`{"ingress":[{"hostname":"a.example.com","service":"%s","originRequest":{%s}},{"service":"http_status:404"}]}`, c.service, c.opts)
+		ing := parseRemote(t, js)
+		req, _ := http.NewRequest("GET", "https://a.example.com/", nil)
+		resp, err := ing.Rules[0].Service.(*httpService).RoundTrip(req)
+		if err != nil {
+			t.Logf("%s: error %v", c.name, err)
+			continue
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Logf("%s: origin request protocol %s", c.name, strings.TrimSpace(string(b)))
+	}
+	_ = tls.VersionTLS12
+}
+
+func TestSpikeTCPService(t *testing.T) {
+	js := `{"ingress":[{"hostname":"db.example.com","service":"tcp://db.default.svc.cluster.local:5432"},
+	 {"hostname":"a.example.com","service":"http://x:80"},{"service":"http_status:404"}]}`
+	ing := parseRemote(t, js)
+	t.Logf("tcp rule parsed as %T %s", ing.Rules[0].Service, ing.Rules[0].Service)
+	// Wildcard catch-all must be last; a hostname rule after it is rejected.
+	var rc RemoteConfig
+	err := json.Unmarshal([]byte(`{"ingress":[{"service":"http_status:404"},{"hostname":"a.example.com","service":"http://x:80"}]}`), &rc)
+	t.Logf("catch-all not last: %v", err)
+	err = json.Unmarshal([]byte(`{"ingress":[{"hostname":"a.example.com","service":"http://x:80"}]}`), &rc)
+	t.Logf("no catch-all: %v", err)
+	err = json.Unmarshal([]byte(`{"ingress":[{"hostname":"a.*.example.com","service":"http://x:80"},{"service":"http_status:404"}]}`), &rc)
+	t.Logf("wildcard in the middle: %v", err)
+}

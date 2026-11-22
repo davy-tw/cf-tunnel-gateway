@@ -1,0 +1,25 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: cf-tunnel-gateway
+spec:
+  controllerName: cf-tunnel-gateway.davy.tw/gateway-controller
+  description: Exposes Gateways through Cloudflare Tunnel.
+  # The credentials Secret. Without accountId and apiToken of its own, the
+  # class uses the controller's CLOUDFLARE_ACCOUNT_ID and
+  # CLOUDFLARE_API_TOKEN; dnsApiToken (optional) is a separate token for
+  # DNS records.
+  parametersRef:
+    group: ""
+    kind: Secret
+    name: cf-tunnel-gateway
+    namespace: cf-tunnel-gateway-system
+---
+apiVersion: networking.k8s.io/v1
+kind: IngressClass
+metadata:
+  name: cf-tunnel-gateway
+  annotations:
+    cf-tunnel-gateway.davy.tw/instance: cf-tunnel-gateway
+spec:
+  controller: cf-tunnel-gateway.davy.tw/ingress-controller

@@ -1,0 +1,16 @@
+{{- if .Values.metrics.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cf-tunnel-gateway.fullname" . }}-metrics
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "cf-tunnel-gateway.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "cf-tunnel-gateway.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.service.port }}
+      targetPort: metrics
+{{- end }}

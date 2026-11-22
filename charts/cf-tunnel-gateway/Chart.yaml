@@ -1,0 +1,13 @@
+apiVersion: v2
+name: cf-tunnel-gateway
+description: Exposes Gateway API Gateways, Ingresses and LoadBalancer Services through Cloudflare Tunnel.
+type: application
+# Published charts get their version and appVersion from the release
+# workflow (see .github/workflows/release.yaml).
+version: 0.0.0-dev
+appVersion: latest
+home: https://github.com/davy-tw/cf-tunnel-gateway
+sources:
+  - https://github.com/davy-tw/cf-tunnel-gateway
+license: MIT-0 OR Apache-2.0
+keywords: [cloudflare, cloudflared, tunnel, gateway-api, ingress, controller]

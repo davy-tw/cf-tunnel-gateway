@@ -1,0 +1,35 @@
+name: ci
+# Pushes to main and tags run these checks from the release workflow, which
+# publishes only once they pass.
+on:
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .go-version
+      - name: gofmt
+        run: test -z "$(gofmt -l .)"
+      - name: vet
+        run: make vet
+      - name: install bundle is up to date
+        run: make manifests && git diff --exit-code dist/
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.19.0
+      - name: helm lint
+        run: make chart-lint
+      - name: render chart
+        run: make chart-render
+      - name: tests (unit + envtest)
+        run: make test-envtest
+        env:
+          CHART_MANIFESTS: ${{ github.workspace }}/bin/chart.yaml
+      - name: build image
+        run: docker build .
