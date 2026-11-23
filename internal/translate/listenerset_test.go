@@ -481,6 +481,21 @@ func TestListenerSetGatewayWildcard(t *testing.T) {
 			}
 		})
 	}
+	// A Gateway route whose wildcard places no rule publishes nothing and
+	// covers nothing.
+	{
+		gw := allowListenerSets(gateway(gwv1.Listener{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80}))
+		broken := route("site", 0, []string{"*.example.com"}, rule("web"))
+		broken.Spec.Rules[0].BackendRefs[0].Filters = []gwv1.HTTPRouteFilter{{Type: gwv1.HTTPRouteFilterRequestHeaderModifier}}
+		ls := listenerSet("tenant", "ok", 1, lsEntry("admin", gwv1.HTTPSProtocolType, 443, "admin.example.com"))
+		res := Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{ls}, HTTPRoutes: []*gwv1.HTTPRoute{broken}})
+		if c := parentCond(t, res, "site", "Accepted"); c.Reason != "UnsupportedValue" {
+			t.Fatalf("broken route: %+v", c)
+		}
+		if c := setListenerCond(t, res, "ok", "admin", "Accepted"); c.Status != "True" {
+			t.Errorf("listener under an unpublished Gateway route wildcard: %+v", c)
+		}
+	}
 	// Without a published wildcard, the more specific listener is fine.
 	gw := allowListenerSets(gateway(gwv1.Listener{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80, Hostname: ptr.To(gwv1.Hostname("*.example.com"))}))
 	ls := listenerSet("tenant", "ok", 1, lsEntry("admin", gwv1.HTTPSProtocolType, 443, "admin.example.com"))

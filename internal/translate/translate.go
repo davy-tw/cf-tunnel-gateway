@@ -1287,6 +1287,7 @@ func (rc *routeCtx) finishHTTPLike(hostnames []gwv1.Hostname, mounts []mount) {
 					conflicts = append(conflicts, c)
 				} else {
 					placed++
+					rc.published(h)
 				}
 			}
 		}
@@ -1344,12 +1345,18 @@ func (rc *routeCtx) filterHosts(hosts []string, tcp bool, set *setState) ([]stri
 			}
 			continue
 		}
-		if rc.rank == 0 && strings.HasPrefix(h, "*.") {
-			t.gatewayWildcards[h] = true
-		}
 		out = append(out, h)
 	}
 	return out, problems, reason
+}
+
+// published notes a hostname the pass placed a rule on. A wildcard the
+// Gateway publishes covers the names below it against ListenerSets; one
+// whose rules all conflicted is not published and covers nothing.
+func (rc *routeCtx) published(h string) {
+	if rc.rank == 0 && strings.HasPrefix(h, "*.") {
+		rc.t.gatewayWildcards[h] = true
+	}
 }
 
 // hostnameNotAllowed checks a hostname against a namespace's
@@ -1491,6 +1498,7 @@ func (rc *routeCtx) tcpRoute(r *gwv1.TCPRoute) {
 					conflicts = append(conflicts, c)
 				} else {
 					placed++
+					rc.published(h)
 				}
 			}
 		}
