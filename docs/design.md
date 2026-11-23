@@ -427,12 +427,19 @@ the Gateway, and the Gateway's claims against other Gateways cover them.
     `Accepted=False` with reason `Conflicted` on that parent, through
     whichever parentRef; a route attached to both the Gateway and a
     ListenerSet is judged separately for each.
-  - A wildcard hostname a ListenerSet holds also covers the names below
-    it against other ListenerSets and routes of other owners. The
-    Gateway's own listeners may still name them.
+  - A wildcard hostname a ListenerSet holds, or one the Gateway publishes
+    (through a listener or a route), also covers the names below it
+    against ListenerSets and routes of other owners. The Gateway's own
+    listeners may still name them, and a ListenerSet may name one below a
+    Gateway listener wildcard that nothing publishes yet.
+  - A ListenerSet listener hostname that another Gateway already publishes
+    gets `HostnameConflict` too.
   - A ListenerSet keeps its hostnames while it exists and the Gateway
-    allows it, also while none of its listeners is valid (so a failed edit
-    does not give them away). They are released when it is deleted
+    allows it, so a failed edit does not give them away: all of them while
+    none of its listeners is valid, and otherwise each hostname a listener
+    still names (valid or not) or a route still publishes through it.
+    They are released when no listener names them and no route publishes
+    them any more, or when it is deleted
     (recreating it makes a new owner), moves to another Gateway, or is no
     longer allowed by `allowedListeners`. A ListenerSet that moves to
     another Gateway therefore goes offline until the old Gateway has
@@ -464,6 +471,9 @@ the Gateway, and the Gateway's claims against other Gateways cover them.
   `Unknown`/`Pending` once its cleanup is done.
 - Listener `certificateRefs` are ignored on ListenerSets too, so no
   ReferenceGrant is checked for them.
+- In TCP mode the port is a placeholder, but listeners on one port still
+  conflict: give each TCP listener of a Gateway and its ListenerSets its
+  own port, or the later one gets `HostnameConflict`.
 
 ## Routes
 
@@ -758,8 +768,9 @@ with the hostname.
 
 ## RBAC
 
-Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes,
-ListenerSets (read, write, status, finalizers), ReferenceGrants (read), Secrets (read and
+Cluster-wide: GatewayClasses, Gateways, HTTPRoutes, GRPCRoutes, TCPRoutes
+(read, write, status, finalizers), ListenerSets (read, and write on their
+status), ReferenceGrants (read), Secrets (read and
 write; Secrets are cached as metadata only, plus the controller's own token
 Secrets), ConfigMaps (read; written only in its own namespace, for the
 Gateway records), Services and their status and finalizers, Ingresses

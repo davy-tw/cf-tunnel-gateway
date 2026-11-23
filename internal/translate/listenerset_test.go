@@ -409,3 +409,97 @@ func TestListenerSetTCP(t *testing.T) {
 		t.Errorf("mine: %+v", c)
 	}
 }
+
+// A ListenerSet whose listener breaks while another stays valid keeps the
+// broken listener's hostname: an older ListenerSet that was conflicted on
+// it does not take it, and the fixed listener is accepted again.
+func TestListenerSetPartlyInvalidKeepsHostname(t *testing.T) {
+	gw := allowListenerSets(gateway())
+	older := listenerSet("tenant-b", "b", 0, lsEntry("x", gwv1.HTTPSProtocolType, 443, "x.example.com"))
+	a := listenerSet("tenant-a", "a", 1,
+		lsEntry("a", gwv1.HTTPProtocolType, 80, "x.example.com"),
+		lsEntry("b", gwv1.HTTPSProtocolType, 443, "y.example.com"))
+	owners := map[string]string{"x.example.com": ListenerSetOwner(a), "y.example.com": ListenerSetOwner(a)}
+	res := Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{older, a}, HostOwners: owners})
+	if c := setListenerCond(t, res, "b", "x", "Accepted"); c.Reason != "HostnameConflict" {
+		t.Fatalf("older: %+v", c)
+	}
+
+	broken := a.DeepCopy()
+	broken.Spec.Listeners[0].Port = 8080
+	for round := 0; round < 2; round++ {
+		res = Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{older, broken}, HostOwners: owners})
+		owners = res.HostOwners
+		if c := setListenerCond(t, res, "b", "x", "Accepted"); c.Reason != "HostnameConflict" {
+			t.Errorf("round %d: the older ListenerSet took the hostname: %+v", round, c)
+		}
+	}
+	if owners["x.example.com"] != ListenerSetOwner(a) {
+		t.Errorf("owners while broken: %v", owners)
+	}
+	res = Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{older, a}, HostOwners: owners})
+	if c := setListenerCond(t, res, "a", "a", "Accepted"); c.Status != "True" {
+		t.Errorf("fixed listener: %+v", c)
+	}
+
+	// Once no listener names it, it is released.
+	dropped := a.DeepCopy()
+	dropped.Spec.Listeners = dropped.Spec.Listeners[1:]
+	res = Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{older, dropped}, HostOwners: owners})
+	if _, kept := res.HostOwners["x.example.com"]; kept {
+		t.Errorf("owners after the listener was removed: %v", res.HostOwners)
+	}
+}
+
+// A wildcard the Gateway publishes through a route covers the names below
+// it against ListenerSets.
+func TestListenerSetGatewayWildcard(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		listener gwv1.Listener
+		hosts    []string
+	}{
+		{"route wildcard", gwv1.Listener{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80}, []string{"*.example.com"}},
+		{"listener wildcard", gwv1.Listener{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80, Hostname: ptr.To(gwv1.Hostname("*.example.com"))}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gw := allowListenerSets(gateway(tc.listener))
+			site := route("site", 0, tc.hosts, rule("web"))
+			ls := listenerSet("tenant", "evil", 1, lsEntry("admin", gwv1.HTTPSProtocolType, 443, "admin.example.com"),
+				lsEntry("open", gwv1.HTTPSProtocolType, 443, ""))
+			r := setRoute("tenant", "evil", 2, "evil", []string{"api.example.com"}, rule("evil"))
+			r.Spec.ParentRefs[0].SectionName = ptr.To(gwv1.SectionName("open"))
+			res := Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{ls}, HTTPRoutes: []*gwv1.HTTPRoute{site, r}})
+			if c := setListenerCond(t, res, "evil", "admin", "Accepted"); c.Reason != "HostnameConflict" || !strings.Contains(c.Message, "covered by *.example.com") {
+				t.Errorf("listener: %+v", c)
+			}
+			if c := parentCond(t, res, "evil", "Accepted"); c.Reason != ReasonConflicted {
+				t.Errorf("route: %+v", c)
+			}
+			if got := strings.Join(rulesOf(res.Config), "\n"); strings.Contains(got, "evil.tenant") {
+				t.Errorf("rules:\n%s", got)
+			}
+		})
+	}
+	// Without a published wildcard, the more specific listener is fine.
+	gw := allowListenerSets(gateway(gwv1.Listener{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80, Hostname: ptr.To(gwv1.Hostname("*.example.com"))}))
+	ls := listenerSet("tenant", "ok", 1, lsEntry("admin", gwv1.HTTPSProtocolType, 443, "admin.example.com"))
+	res := Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{ls}})
+	if c := setListenerCond(t, res, "ok", "admin", "Accepted"); c.Status != "True" {
+		t.Errorf("listener under an unused Gateway wildcard listener: %+v", c)
+	}
+}
+
+// A ListenerSet listener hostname another Gateway publishes is a conflict.
+func TestListenerSetHostnameClaimedElsewhere(t *testing.T) {
+	gw := allowListenerSets(gateway())
+	ls := listenerSet("tenant", "a", 0, lsEntry("x", gwv1.HTTPSProtocolType, 443, "x.example.com"))
+	res := Translate(&Input{Gateway: gw, ListenerSets: []*gwv1.ListenerSet{ls},
+		Claimed: map[string]Claim{"x.example.com": {Gateway: "other/gw"}}})
+	if c := setListenerCond(t, res, "a", "x", "Accepted"); c.Reason != "HostnameConflict" || !strings.Contains(c.Message, "other/gw") {
+		t.Errorf("listener: %+v", c)
+	}
+	if _, ok := res.HostOwners["x.example.com"]; ok {
+		t.Errorf("owners: %v", res.HostOwners)
+	}
+}

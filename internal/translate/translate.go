@@ -186,7 +186,7 @@ type Result struct {
 // Translate builds the tunnel configuration and statuses.
 func Translate(in *Input) *Result {
 	t := &translator{in: in, byKey: map[ruleKey]*entry{}, hostKind: map[string]hostOwner{},
-		sets: map[types.NamespacedName]*setState{}, owner: map[string]int{}, declared: map[string]int{},
+		sets: map[types.NamespacedName]*setState{}, owner: map[string]int{}, declared: map[string]int{}, gatewayWildcards: map[string]bool{},
 		parentResults: map[RouteRef]map[int]ParentResult{}}
 	return t.run()
 }
@@ -212,6 +212,10 @@ type translator struct {
 	// declared maps the hostnames of accepted ListenerSet listeners to
 	// their owner's rank.
 	declared map[string]int
+	// gatewayWildcards are the wildcard hostnames the Gateway publishes
+	// through its routes; they cover the names below them against
+	// ListenerSets.
+	gatewayWildcards map[string]bool
 	// earlier holds the accepted listeners that later ListenerSet
 	// listeners must not conflict with.
 	earlier []*listenerState
@@ -1339,6 +1343,9 @@ func (rc *routeCtx) filterHosts(hosts []string, tcp bool, set *setState) ([]stri
 				reason = ReasonConflicted
 			}
 			continue
+		}
+		if rc.rank == 0 && strings.HasPrefix(h, "*.") {
+			t.gatewayWildcards[h] = true
 		}
 		out = append(out, h)
 	}

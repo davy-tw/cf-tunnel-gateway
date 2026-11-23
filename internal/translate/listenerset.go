@@ -187,12 +187,18 @@ func (t *translator) seedOwners() {
 		if _, held := t.owner[h]; rank >= 0 && !held {
 			t.owner[h] = rank
 		}
+		// The Gateway's recorded hostnames are ones it published.
+		if rank == 0 && t.owner[h] == 0 && strings.HasPrefix(h, "*.") {
+			t.gatewayWildcards[h] = true
+		}
 	}
 }
 
 // claim takes a hostname for the owner of rank, or says why it cannot: the
 // hostname belongs to another owner, or falls under a wildcard hostname
-// a ListenerSet holds.
+// another owner holds: a ListenerSet's, or one the Gateway publishes
+// through a route (against ListenerSets only; the Gateway's own listeners
+// never go through claim).
 func (t *translator) claim(host string, rank int) string {
 	if o, ok := t.owner[host]; ok {
 		if o == rank {
@@ -202,7 +208,7 @@ func (t *translator) claim(host string, rank int) string {
 	}
 	var wildcards []string
 	for h, o := range t.owner {
-		if o != rank && o != 0 && strings.HasPrefix(h, "*.") {
+		if o != rank && strings.HasPrefix(h, "*.") && (o != 0 || t.gatewayWildcards[h]) {
 			wildcards = append(wildcards, h)
 		}
 	}
@@ -258,6 +264,9 @@ func (t *translator) buildSetListeners(ss *setState) {
 				replaceCond(&st.res.Conditions, cond(gwv1.ListenerConditionAccepted, false, ReasonHostnameNotAllowed, why, gen))
 			} else {
 				reason, msg := conflictWith(l, t.earlier)
+				if c, taken := t.in.Claimed[h]; reason == "" && h != "" && taken {
+					reason, msg = gwv1.ListenerReasonHostnameConflict, fmt.Sprintf("hostname %s is already published by Gateway %s", h, c.Gateway)
+				}
 				if reason == "" && h != "" && st.res.Valid {
 					if why := t.claim(h, rank); why != "" {
 						reason, msg = gwv1.ListenerReasonHostnameConflict, why
@@ -281,6 +290,17 @@ func (t *translator) buildSetListeners(ss *setState) {
 		}
 		t.listeners = append(t.listeners, st)
 	}
+}
+
+// namesHostname reports whether a listener of the ListenerSet names host,
+// valid or not, and its namespace may publish it.
+func (t *translator) namesHostname(ss *setState, host string) bool {
+	for _, e := range ss.ls.Spec.Listeners {
+		if listenerHostname(e.Hostname) == host {
+			return t.hostnameNotAllowed(host, ss.ls.Namespace, false) == ""
+		}
+	}
+	return false
 }
 
 func replaceCond(conds *[]metav1.Condition, c metav1.Condition) {
@@ -338,8 +358,11 @@ func (t *translator) listenerSetResults(gatewayAccepted bool) ([]ListenerSetResu
 
 // hostOwners returns the owners to record: of every published hostname,
 // of every hostname an accepted ListenerSet listener declares, and the
-// recorded hostnames of allowed ListenerSets that are not accepted at the
-// moment (so that a failed edit does not give their hostnames away).
+// recorded hostnames an allowed ListenerSet still holds although it does
+// not use them at the moment, so that a failed edit does not give them
+// away: those a listener of it still names (valid or not) and its
+// namespace may publish, and all of them while none of its listeners is
+// valid.
 func (t *translator) hostOwners(published []Hostname) map[string]string {
 	out := map[string]string{}
 	for _, h := range published {
@@ -354,7 +377,11 @@ func (t *translator) hostOwners(published []Hostname) map[string]string {
 		if _, set := out[h]; set {
 			continue
 		}
-		if r := t.rankOf(k); r > 0 && !t.setOfRank(r).accepted && t.owner[h] == r {
+		r := t.rankOf(k)
+		if r <= 0 || t.owner[h] != r {
+			continue
+		}
+		if ss := t.setOfRank(r); !ss.accepted || t.namesHostname(ss, h) {
 			out[h] = k
 		}
 	}
