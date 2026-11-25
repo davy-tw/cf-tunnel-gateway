@@ -9,6 +9,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	gwv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -78,34 +79,23 @@ func (r *GatewayReconciler) writeGatewayStatus(ctx context.Context, gw *gwv1.Gat
 
 	var listeners []gwv1.ListenerStatus
 	for _, lr := range res.Listeners {
-		var conds []metav1.Condition
+		var prev []metav1.Condition
 		for _, old := range orig.Status.Listeners {
 			if old.Name == lr.Name {
-				for _, c := range old.Conditions {
-					if meta.FindStatusCondition(lr.Conditions, c.Type) != nil || c.Type == string(gwv1.ListenerConditionProgrammed) {
-						conds = append(conds, c)
-					}
-				}
+				prev = old.Conditions
 			}
 		}
-		for _, c := range lr.Conditions {
-			meta.SetStatusCondition(&conds, c)
-		}
-		lp := metav1.Condition{Type: string(gwv1.ListenerConditionProgrammed), ObservedGeneration: gen,
-			Status: programmed.Status, Reason: string(gwv1.ListenerReasonProgrammed), Message: programmed.Message}
-		if !lr.Valid {
-			lp.Status, lp.Reason, lp.Message = metav1.ConditionFalse, string(gwv1.ListenerReasonInvalid), "listener is not valid"
-		} else if programmed.Status != metav1.ConditionTrue {
-			lp.Reason = string(gwv1.ListenerReasonPending)
-		}
-		meta.SetStatusCondition(&conds, lp)
-		kinds := lr.SupportedKinds
-		if kinds == nil {
-			kinds = []gwv1.RouteGroupKind{}
-		}
+		conds, kinds := listenerConditions(prev, lr, programmed, gen)
 		listeners = append(listeners, gwv1.ListenerStatus{Name: lr.Name, SupportedKinds: kinds, AttachedRoutes: lr.AttachedRoutes, Conditions: conds})
 	}
 	st.Listeners = listeners
+	if r.Features.ListenerSet() {
+		n := res.AttachedListenerSets
+		if ip != nil {
+			n = 0 // see writeListenerSetStatus
+		}
+		st.AttachedListenerSets = ptr.To(n)
+	}
 
 	st.Addresses = nil
 	if out.tunnel != nil {
@@ -118,7 +108,8 @@ func (r *GatewayReconciler) writeGatewayStatus(ctx context.Context, gw *gwv1.Gat
 }
 
 func gatewayStatusEqual(a, b *gwv1.GatewayStatus) bool {
-	if !equalConditions(a.Conditions, b.Conditions) || len(a.Listeners) != len(b.Listeners) || len(a.Addresses) != len(b.Addresses) {
+	if !equalConditions(a.Conditions, b.Conditions) || len(a.Listeners) != len(b.Listeners) || len(a.Addresses) != len(b.Addresses) ||
+		ptr.Deref(a.AttachedListenerSets, -1) != ptr.Deref(b.AttachedListenerSets, -1) {
 		return false
 	}
 	for i := range a.Addresses {
@@ -205,17 +196,53 @@ func dnsCondition(pr translate.ParentResult, out *outcome, gen int64) *metav1.Co
 // writeRouteStatus rewrites this controller's entries for this Gateway in
 // every route's status: results from res, and removal where a route no
 // longer attaches.
-func (r *GatewayReconciler) writeRouteStatus(ctx context.Context, gw *gwv1.Gateway, rs *routeSet, res *translate.Result, out *outcome) error {
+//
+// Entries for a ListenerSet belong to the Gateway the ListenerSet names. An
+// entry of this controller for a ListenerSet that no Gateway of this
+// controller serves any more (deleted, or moved to another Gateway) is
+// removed by whichever Gateway's reconcile comes across it.
+func (r *GatewayReconciler) writeRouteStatus(ctx context.Context, gw *gwv1.Gateway, rs *routeSet, res *translate.Result, out *outcome, sets listenerSets) error {
 	results := map[translate.RouteRef]translate.RouteResult{}
 	for _, rr := range res.Routes {
 		results[rr.Ref] = rr
+	}
+	own := map[types.NamespacedName]bool{}
+	for _, ls := range sets.of(gw) {
+		own[types.NamespacedName{Namespace: ls.Namespace, Name: ls.Name}] = true
+	}
+	served := map[types.NamespacedName]bool{}
+	servedElsewhere := func(key types.NamespacedName) bool {
+		if v, ok := served[key]; ok {
+			return v
+		}
+		v := false
+		if ls := sets[key]; ls != nil {
+			if parent, ok := listenerSetGateway(ls); ok {
+				other := &gwv1.Gateway{}
+				if err := r.Get(ctx, parent, other); err == nil {
+					gc, err := r.managedClass(ctx, string(other.Spec.GatewayClassName))
+					// When in doubt, leave the entry to that Gateway.
+					v = err != nil || gc != nil
+				} else {
+					v = !apierrors.IsNotFound(err)
+				}
+			}
+		}
+		served[key] = v
+		return v
 	}
 	var errs []error
 	for _, t := range rs.targets() {
 		ref := translate.RouteRef{Kind: t.kind, Namespace: t.obj.GetNamespace(), Name: t.obj.GetName()}
 		result, has := results[ref]
 		ours := func(p gwv1.RouteParentStatus) bool {
-			return string(p.ControllerName) == r.Config.ControllerName && translate.ParentTargets(p.ParentRef, ref.Namespace, gw.Namespace, gw.Name)
+			if string(p.ControllerName) != r.Config.ControllerName {
+				return false
+			}
+			if key, ok := listenerSetParentRef(p.ParentRef, ref.Namespace); ok {
+				return own[key] || !servedElsewhere(key)
+			}
+			return translate.ParentTargets(p.ParentRef, ref.Namespace, gw.Namespace, gw.Name)
 		}
 		hadOurs := false
 		var parents, old []gwv1.RouteParentStatus

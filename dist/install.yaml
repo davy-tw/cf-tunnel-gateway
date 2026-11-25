@@ -76,11 +76,20 @@ rules:
 - apiGroups:
   - gateway.networking.k8s.io
   resources:
+  - listenersets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - gateway.networking.k8s.io
+  resources:
   - gatewayclasses/status
   - gateways/status
   - httproutes/status
   - grpcroutes/status
   - tcproutes/status
+  - listenersets/status
   verbs:
   - get
   - update

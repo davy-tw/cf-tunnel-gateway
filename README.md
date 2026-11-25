@@ -6,7 +6,7 @@ with no inbound port, NodePort or cloud load balancer. It serves three front
 doors:
 
 1. Gateway API `Gateway`s of a managed GatewayClass (HTTPRoute, GRPCRoute,
-   TCPRoute)
+   TCPRoute), with listeners added by ListenerSets
 2. `Ingress`es of the `cf-tunnel-gateway` IngressClass
 3. `Service`s of `type: LoadBalancer` with
    `loadBalancerClass: cf-tunnel-gateway`
@@ -141,8 +141,9 @@ With a base domain, objects without a hostname get
 `<name>-<namespace>.<base domain>` (sanitized, at most 63 characters per
 label), and TCP ports `<name>-<namespace>-<port>.<base domain>`. A
 hostname belongs to the first Gateway that publishes it; routes
-elsewhere report a conflict. Existing DNS records that the controller did
-not create are never overwritten.
+elsewhere report a conflict. Within a Gateway, it belongs to the Gateway
+or to the first ListenerSet that uses it. Existing DNS records that the
+controller did not create are never overwritten.
 
 ## What is supported
 
@@ -161,6 +162,7 @@ dropped.
 | TCPRoute | Yes, with the `hostname` annotation; clients use `cloudflared access tcp` |
 | TLSRoute, UDPRoute | No |
 | Cross-namespace backends | With a ReferenceGrant |
+| ListenerSet | Yes, when the Gateway's `allowedListeners` allows it (none by default). Its listeners are served on the Gateway's tunnel; routes attach with a `ListenerSet` parentRef. A hostname belongs to one owner of the Gateway (the Gateway, or the first ListenerSet to use it), on every port and path, so an allowed namespace cannot take or extend another owner's hostname ([example](examples/listenerset.yaml)) |
 | Ingress | `Prefix`, `Exact`, `ImplementationSpecific` paths, `defaultBackend`; `spec.tls` is not needed |
 | LoadBalancer Service | One HTTP port per Service, more ports as TCP in TCP mode |
 

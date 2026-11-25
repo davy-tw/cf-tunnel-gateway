@@ -58,9 +58,9 @@ func main() {
 	waitProbes := startWaitingProbes(cfg.ProbeAddr)
 	features := &controller.Features{}
 	for {
-		grpc, tcp, grant, err := controller.DetectFeatures(dc)
+		grpc, tcp, grant, ls, err := controller.DetectFeatures(dc)
 		if err == nil {
-			features.Set(grpc, tcp, grant)
+			features.Set(grpc, tcp, grant, ls)
 			break
 		}
 		var missing *controller.ErrMissingCoreCRDs
@@ -76,6 +76,7 @@ func main() {
 	}
 	for kind, on := range map[string]bool{
 		"GRPCRoute": features.GRPCRoute(), "TCPRoute": features.TCPRoute(), "ReferenceGrant": features.ReferenceGrant(),
+		"ListenerSet": features.ListenerSet(),
 	} {
 		if !on {
 			setupLog.Info("optional Gateway API kind not served at v1; feature disabled until it is installed", "kind", kind)

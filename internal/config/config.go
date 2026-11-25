@@ -41,6 +41,14 @@ const (
 	AnnotationHostnames      = Domain + "/hostnames"
 	AnnotationGRPCNotified   = Domain + "/grpc-notified"
 	AnnotationDNSHostnames   = Domain + "/dns-hostnames"
+	// AnnotationHostnameOwners maps each hostname the Gateway publishes,
+	// or a ListenerSet listener of it declares, to its owner within the
+	// Gateway: the Gateway or one ListenerSet. The first owner keeps it.
+	AnnotationHostnameOwners = Domain + "/hostname-owners"
+	// AnnotationListenerSets lists the ListenerSets ("namespace/name")
+	// whose status the Gateway wrote, so that one that moves away can be
+	// released.
+	AnnotationListenerSets = Domain + "/listener-sets"
 
 	// Ingress and Service annotations.
 	AnnotationGateway         = Domain + "/gateway"

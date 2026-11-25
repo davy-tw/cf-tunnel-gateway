@@ -396,3 +396,91 @@ func TestIngressAndService(t *testing.T) {
 		}
 	}
 }
+
+// TestListenerSet covers a ListenerSet from another namespace: its
+// listener is served on its parent Gateway's tunnel and DNS once the
+// Gateway allows it, and a newer route on the Gateway cannot take its
+// hostname.
+func TestListenerSet(t *testing.T) {
+	s := setup(t, "ls")
+	class := gwv1.ObjectName(env("E2E_GATEWAY_CLASS", "cf-tunnel-gateway"))
+	team := s.ns + "-team"
+	s.create(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: team}})
+	t.Cleanup(func() {
+		_ = s.c.Delete(context.Background(), &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: team}})
+	})
+	host := team + ".example.com"
+	s.create(backend(s.ns, "web", 80), backend(team, "web", 80), s.connectorParams("off", true),
+		&gwv1.Gateway{ObjectMeta: metav1.ObjectMeta{Namespace: s.ns, Name: "shared"}, Spec: gwv1.GatewaySpec{
+			GatewayClassName: class, Listeners: []gwv1.Listener{{Name: "http", Protocol: gwv1.HTTPProtocolType, Port: 80}},
+			AllowedListeners: &gwv1.AllowedListeners{Namespaces: &gwv1.ListenerNamespaces{From: ptr.To(gwv1.NamespacesFromAll)}},
+			Infrastructure:   &gwv1.GatewayInfrastructure{ParametersRef: &gwv1.LocalParametersReference{Kind: "ConfigMap", Name: "off"}},
+		}},
+		&gwv1.ListenerSet{ObjectMeta: metav1.ObjectMeta{Namespace: team, Name: "apps"}, Spec: gwv1.ListenerSetSpec{
+			ParentRef: gwv1.ParentGatewayReference{Name: gwv1.ObjectName("shared"), Namespace: ptr.To(gwv1.Namespace(s.ns))},
+			Listeners: []gwv1.ListenerEntry{{Name: "web", Protocol: gwv1.HTTPSProtocolType, Port: 443, Hostname: ptr.To(gwv1.Hostname(host))}},
+		}},
+		&gwv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: team, Name: "app"}, Spec: gwv1.HTTPRouteSpec{
+			CommonRouteSpec: gwv1.CommonRouteSpec{ParentRefs: []gwv1.ParentReference{{Kind: ptr.To(gwv1.Kind("ListenerSet")), Name: "apps"}}},
+			Rules: []gwv1.HTTPRouteRule{{BackendRefs: []gwv1.HTTPBackendRef{{BackendRef: gwv1.BackendRef{
+				BackendObjectReference: gwv1.BackendObjectReference{Name: "web", Port: ptr.To(gwv1.PortNumber(80))}}}}}},
+		}},
+	)
+	s.wait("gateway programmed", 2*time.Minute, s.programmed("shared"))
+	s.wait("ListenerSet programmed", time.Minute, func() error {
+		ls := &gwv1.ListenerSet{}
+		if err := s.c.Get(s.ctx, types.NamespacedName{Namespace: team, Name: "apps"}, ls); err != nil {
+			return err
+		}
+		c := meta.FindStatusCondition(ls.Status.Conditions, "Programmed")
+		if c == nil || c.Status != metav1.ConditionTrue {
+			return fmt.Errorf("Programmed: %+v", c)
+		}
+		return nil
+	})
+	tunnel := s.tunnelOf("shared")
+	s.wait("published", time.Minute, func() error {
+		st, err := s.state()
+		if err != nil {
+			return err
+		}
+		cfg := st.Configs[tunnel]
+		if cfg == nil || len(cfg.Ingress) == 0 || cfg.Ingress[0].Hostname != host ||
+			cfg.Ingress[0].Service != fmt.Sprintf("http://web.%s.svc.cluster.local:80", team) {
+			return fmt.Errorf("config = %+v", cfg)
+		}
+		if got := s.cname(st, host); got != tunnel {
+			return fmt.Errorf("CNAME %s -> %q", host, got)
+		}
+		return nil
+	})
+
+	// A newer route on the Gateway cannot take the ListenerSet's hostname.
+	s.create(&gwv1.HTTPRoute{ObjectMeta: metav1.ObjectMeta{Namespace: s.ns, Name: "thief"}, Spec: gwv1.HTTPRouteSpec{
+		CommonRouteSpec: gwv1.CommonRouteSpec{ParentRefs: []gwv1.ParentReference{{Name: "shared"}}},
+		Hostnames:       []gwv1.Hostname{gwv1.Hostname(host)},
+		Rules: []gwv1.HTTPRouteRule{{BackendRefs: []gwv1.HTTPBackendRef{{BackendRef: gwv1.BackendRef{
+			BackendObjectReference: gwv1.BackendObjectReference{Name: "web", Port: ptr.To(gwv1.PortNumber(80))}}}}}},
+	}})
+	s.wait("newer route conflicted", time.Minute, func() error {
+		r := &gwv1.HTTPRoute{}
+		if err := s.c.Get(s.ctx, s.key("thief"), r); err != nil {
+			return err
+		}
+		if len(r.Status.Parents) != 1 {
+			return fmt.Errorf("parents = %+v", r.Status.Parents)
+		}
+		c := meta.FindStatusCondition(r.Status.Parents[0].Conditions, "Accepted")
+		if c == nil || c.Status != metav1.ConditionFalse || c.Reason != "Conflicted" {
+			return fmt.Errorf("Accepted: %+v", c)
+		}
+		return nil
+	})
+	st, err := s.state()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg := st.Configs[tunnel]; cfg == nil || cfg.Ingress[0].Service != fmt.Sprintf("http://web.%s.svc.cluster.local:80", team) {
+		t.Errorf("config after the newer route = %+v", cfg)
+	}
+}

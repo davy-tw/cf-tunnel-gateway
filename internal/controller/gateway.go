@@ -128,7 +128,8 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		if !deleting && !classExists {
 			// The class is gone, perhaps only for a moment. Keep the tunnel
 			// and connectors running and report it.
-			return ctrl.Result{}, r.writeClassMissingStatus(ctx, gw)
+			return ctrl.Result{}, errors.Join(r.writeClassMissingStatus(ctx, gw),
+				r.notAcceptListenerSets(ctx, gw, fmt.Sprintf("GatewayClass %q of the parent Gateway not found", gw.Spec.GatewayClassName)))
 		}
 		done, err := r.finalize(ctx, gw, !deleting)
 		if err != nil {
@@ -139,6 +140,9 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		}
 		if !done {
 			return ctrl.Result{RequeueAfter: time.Minute}, nil
+		}
+		if err := r.releaseListenerSets(ctx, gw, deleting); err != nil {
+			return ctrl.Result{}, err
 		}
 		if err := r.deleteRecord(ctx, gw); err != nil {
 			return ctrl.Result{}, err
@@ -162,6 +166,10 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	sets, err := r.listListenerSets(ctx)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Namespace policy.
 	pol, err := namespacePolicy(ctx, r.Client, r.Config, gw.Namespace)
@@ -179,8 +187,9 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		if err := errors.Join(
 			r.withdraw(ctx, gw),
 			relErr,
-			r.writeRouteStatus(ctx, gw, rs, res, nil),
+			r.writeRouteStatus(ctx, gw, rs, res, nil, sets),
 			r.writeGatewayStatus(ctx, gw, res, nil, &pendingError{msg}, &outcome{}),
+			r.notAcceptListenerSets(ctx, gw, "the parent Gateway is not accepted: "+msg),
 		); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -203,7 +212,7 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 		return ctrl.Result{}, perr
 	}
 
-	in, err := r.translateInput(ctx, gw, rs)
+	in, err := r.translateInput(ctx, gw, rs, sets.of(gw))
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -238,9 +247,16 @@ func (r *GatewayReconciler) reconcile(ctx context.Context, gw *gwv1.Gateway) (ct
 	}
 
 	statusErr := errors.Join(
-		r.writeRouteStatus(ctx, gw, rs, res, out),
+		r.writeRouteStatus(ctx, gw, rs, res, out, sets),
 		r.writeGatewayStatus(ctx, gw, res, ip, progErr, out),
 	)
+	if statusErr == nil {
+		// ListenerSet Programmed follows the Gateway's, written above.
+		statusErr = r.writeListenerSetStatus(ctx, gw, sets.of(gw), res, ip)
+	}
+	if statusErr == nil && r.Features.ListenerSet() {
+		statusErr = r.releaseMovedListenerSets(ctx, gw, sets)
+	}
 	if statusErr != nil {
 		return ctrl.Result{}, statusErr
 	}
@@ -267,6 +283,7 @@ func ignoreRateLimit(err error) error {
 var controllerAnnotations = []string{
 	config.AnnotationTunnel, config.AnnotationPreviousTunnel, config.AnnotationTokenSecret,
 	config.AnnotationHostnames, config.AnnotationDNSHostnames, config.AnnotationGRPCNotified,
+	config.AnnotationHostnameOwners, config.AnnotationListenerSets,
 }
 
 // routeSet holds every route in the cluster, by kind.
@@ -306,10 +323,11 @@ func (r *GatewayReconciler) listRoutes(ctx context.Context) (*routeSet, error) {
 	return rs, nil
 }
 
-func (r *GatewayReconciler) translateInput(ctx context.Context, gw *gwv1.Gateway, rs *routeSet) (*translate.Input, error) {
+func (r *GatewayReconciler) translateInput(ctx context.Context, gw *gwv1.Gateway, rs *routeSet, sets []*gwv1.ListenerSet) (*translate.Input, error) {
 	in := &translate.Input{
 		Gateway:    gw,
 		HTTPRoutes: rs.http, GRPCRoutes: rs.grpc, TCPRoutes: rs.tcp,
+		ListenerSets:  sets,
 		ClusterDomain: r.Config.ClusterDomain,
 		GRPCRoute:     r.Features.GRPCRoute(), TCPRoute: r.Features.TCPRoute(), TCPMode: r.Config.TCPMode,
 		AllowedHostnames: allowedHostnamesFunc(ctx, r.Client, r.Config),
@@ -323,7 +341,7 @@ func (r *GatewayReconciler) translateInput(ctx context.Context, gw *gwv1.Gateway
 			in.ReferenceGrants = append(in.ReferenceGrants, &l.Items[i])
 		}
 	}
-	if needsNamespaceLabels(gw) {
+	if needsNamespaceLabels(gw, sets) {
 		var nl corev1.NamespaceList
 		if err := r.List(ctx, &nl); err != nil {
 			return nil, err
@@ -345,6 +363,13 @@ func (r *GatewayReconciler) translateInput(ctx context.Context, gw *gwv1.Gateway
 		return nil, err
 	}
 	in.Claimed = claimed
+	// Owners within the Gateway come from its record, which tenants
+	// cannot write.
+	rec, err := r.recorded(ctx, gw)
+	if err != nil {
+		return nil, err
+	}
+	in.HostOwners = parseOwners(rec[config.AnnotationHostnameOwners])
 	in.Generated = r.generatedRoute(ctx)
 	return in, nil
 }
@@ -397,11 +422,27 @@ func (r *GatewayReconciler) generatedRoute(ctx context.Context) func(metav1.Obje
 	}
 }
 
-func needsNamespaceLabels(gw *gwv1.Gateway) bool {
+func needsNamespaceLabels(gw *gwv1.Gateway, sets []*gwv1.ListenerSet) bool {
+	selects := func(ar *gwv1.AllowedRoutes) bool {
+		return ar != nil && ar.Namespaces != nil && ar.Namespaces.From != nil && *ar.Namespaces.From == gwv1.NamespacesFromSelector
+	}
 	for _, l := range gw.Spec.Listeners {
-		if l.AllowedRoutes != nil && l.AllowedRoutes.Namespaces != nil && l.AllowedRoutes.Namespaces.From != nil &&
-			*l.AllowedRoutes.Namespaces.From == gwv1.NamespacesFromSelector {
+		if selects(l.AllowedRoutes) {
 			return true
+		}
+	}
+	if len(sets) == 0 {
+		return false
+	}
+	if al := gw.Spec.AllowedListeners; al != nil && al.Namespaces != nil && al.Namespaces.From != nil &&
+		*al.Namespaces.From == gwv1.NamespacesFromSelector {
+		return true
+	}
+	for _, ls := range sets {
+		for _, l := range ls.Spec.Listeners {
+			if selects(l.AllowedRoutes) {
+				return true
+			}
 		}
 	}
 	return false
@@ -431,7 +472,7 @@ func (r *GatewayReconciler) release(ctx context.Context, gw *gwv1.Gateway) error
 	if err != nil {
 		return err
 	}
-	ann := map[string]string{config.AnnotationHostnames: ""}
+	ann := map[string]string{config.AnnotationHostnames: "", config.AnnotationHostnameOwners: ""}
 	if hosts := recordedDNSHostnames(rec, gw); len(hosts) > 0 && r.Config.DNSPolicy == config.DNSPolicySync {
 		creds, err := r.gatewayCredentials(ctx, gw)
 		var ip *invalidParamsError
@@ -555,6 +596,23 @@ func parseHostnames(raw string) map[string][]string {
 	}
 	_ = json.Unmarshal([]byte(raw), &m)
 	return m
+}
+
+func parseOwners(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	m := map[string]string{}
+	_ = json.Unmarshal([]byte(raw), &m)
+	return m
+}
+
+func formatOwners(owners map[string]string) string {
+	if len(owners) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(owners) // map keys are sorted
+	return string(b)
 }
 
 func formatHostnames(hosts []translate.Hostname) string {
@@ -702,10 +760,11 @@ func (r *GatewayReconciler) provision(ctx context.Context, gw *gwv1.Gateway, cre
 	}
 
 	ann := map[string]string{
-		config.AnnotationTunnel:       tun.ID,
-		config.AnnotationTokenSecret:  connector.SecretName(gw.Name),
-		config.AnnotationHostnames:    formatHostnames(res.Hostnames),
-		config.AnnotationDNSHostnames: strings.Join(dnsHosts, ","),
+		config.AnnotationTunnel:         tun.ID,
+		config.AnnotationTokenSecret:    connector.SecretName(gw.Name),
+		config.AnnotationHostnames:      formatHostnames(res.Hostnames),
+		config.AnnotationDNSHostnames:   strings.Join(dnsHosts, ","),
+		config.AnnotationHostnameOwners: formatOwners(res.HostOwners),
 	}
 	if res.GRPC && gw.Annotations[config.AnnotationGRPCNotified] == "" {
 		r.event(gw, corev1.EventTypeNormal, "GRPCRouteAttached",
@@ -919,7 +978,11 @@ func (r *GatewayReconciler) finalize(ctx context.Context, gw *gwv1.Gateway, unma
 	if err != nil {
 		return false, err
 	}
-	if err := r.writeRouteStatus(ctx, gw, rs, &translate.Result{}, nil); err != nil {
+	sets, err := r.listListenerSets(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := r.writeRouteStatus(ctx, gw, rs, &translate.Result{}, nil, sets); err != nil {
 		return false, err
 	}
 	if unmanage {

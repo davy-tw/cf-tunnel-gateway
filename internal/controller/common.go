@@ -66,7 +66,7 @@ func ClientOptions() client.Options {
 // Features records which optional Gateway API kinds the cluster serves.
 // Kinds can appear while the controller runs (see FeatureWatcher).
 type Features struct {
-	grpc, tcp, grant atomic.Bool
+	grpc, tcp, grant, listenerSet atomic.Bool
 }
 
 // GRPCRoute reports whether GRPCRoute is served.
@@ -78,17 +78,21 @@ func (f *Features) TCPRoute() bool { return f.tcp.Load() }
 // ReferenceGrant reports whether ReferenceGrant is served.
 func (f *Features) ReferenceGrant() bool { return f.grant.Load() }
 
+// ListenerSet reports whether ListenerSet is served.
+func (f *Features) ListenerSet() bool { return f.listenerSet.Load() }
+
 // Set records the served kinds.
-func (f *Features) Set(grpc, tcp, grant bool) {
+func (f *Features) Set(grpc, tcp, grant, listenerSet bool) {
 	f.grpc.Store(grpc)
 	f.tcp.Store(tcp)
 	f.grant.Store(grant)
+	f.listenerSet.Store(listenerSet)
 }
 
 // AllFeatures enables every optional kind (tests).
 func AllFeatures() *Features {
 	f := &Features{}
-	f.Set(true, true, true)
+	f.Set(true, true, true, true)
 	return f
 }
 
@@ -101,11 +105,11 @@ func (e *ErrMissingCoreCRDs) Error() string {
 }
 
 // DetectFeatures checks which Gateway API kinds are served at v1.
-func DetectFeatures(dc discovery.DiscoveryInterface) (grpc, tcp, grant bool, err error) {
+func DetectFeatures(dc discovery.DiscoveryInterface) (grpc, tcp, grant, listenerSet bool, err error) {
 	kinds := map[string]bool{}
 	list, err := dc.ServerResourcesForGroupVersion(gwv1.GroupVersion.String())
 	if err != nil && !apierrors.IsNotFound(err) {
-		return false, false, false, err
+		return false, false, false, false, err
 	}
 	if list != nil {
 		for _, r := range list.APIResources {
@@ -119,9 +123,9 @@ func DetectFeatures(dc discovery.DiscoveryInterface) (grpc, tcp, grant bool, err
 		}
 	}
 	if len(missing) > 0 {
-		return false, false, false, &ErrMissingCoreCRDs{Missing: missing}
+		return false, false, false, false, &ErrMissingCoreCRDs{Missing: missing}
 	}
-	return kinds["GRPCRoute"], kinds["TCPRoute"], kinds["ReferenceGrant"], nil
+	return kinds["GRPCRoute"], kinds["TCPRoute"], kinds["ReferenceGrant"], kinds["ListenerSet"], nil
 }
 
 // FeatureWatcher rechecks the served kinds every minute and calls the
@@ -137,6 +141,7 @@ type FeatureWatcher struct {
 	onGRPC  []func() error
 	onTCP   []func() error
 	onGrant []func() error
+	onLS    []func() error
 }
 
 // OnGRPCRoute registers fn to run when GRPCRoute becomes available.
@@ -160,6 +165,13 @@ func (w *FeatureWatcher) OnReferenceGrant(fn func() error) {
 	w.mu.Unlock()
 }
 
+// OnListenerSet registers fn to run when ListenerSet becomes available.
+func (w *FeatureWatcher) OnListenerSet(fn func() error) {
+	w.mu.Lock()
+	w.onLS = append(w.onLS, fn)
+	w.mu.Unlock()
+}
+
 // Start implements manager.Runnable.
 func (w *FeatureWatcher) Start(ctx context.Context) error {
 	interval := w.Interval
@@ -179,7 +191,7 @@ func (w *FeatureWatcher) Start(ctx context.Context) error {
 }
 
 func (w *FeatureWatcher) check(ctx context.Context) {
-	grpc, tcp, grant, err := DetectFeatures(w.Discovery)
+	grpc, tcp, grant, ls, err := DetectFeatures(w.Discovery)
 	if err != nil {
 		log.FromContext(ctx).Error(err, "rechecking Gateway API kinds")
 		return
@@ -205,6 +217,10 @@ func (w *FeatureWatcher) check(ctx context.Context) {
 	if grant && !w.Features.ReferenceGrant() {
 		w.Features.grant.Store(true)
 		run("ReferenceGrant", w.onGrant)
+	}
+	if ls && !w.Features.ListenerSet() {
+		w.Features.listenerSet.Store(true)
+		run("ListenerSet", w.onLS)
 	}
 }
 

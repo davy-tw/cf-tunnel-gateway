@@ -29,6 +29,7 @@ import (
 var recordedAnnotations = []string{
 	config.AnnotationTunnel, config.AnnotationPreviousTunnel,
 	config.AnnotationHostnames, config.AnnotationDNSHostnames,
+	config.AnnotationHostnameOwners, config.AnnotationListenerSets,
 }
 
 const (

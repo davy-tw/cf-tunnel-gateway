@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -97,8 +98,9 @@ func (r *GatewayReconciler) gatewaysForConfigMap(ctx context.Context, obj client
 }
 
 // gatewaysForRoute maps a route to the Gateways in its parentRefs and in
-// its status (so that detaching updates the old Gateway).
-func (r *GatewayReconciler) gatewaysForRoute(_ context.Context, obj client.Object) []reconcile.Request {
+// its status (so that detaching updates the old Gateway). A parentRef to a
+// ListenerSet maps to the ListenerSet's Gateway.
+func (r *GatewayReconciler) gatewaysForRoute(ctx context.Context, obj client.Object) []reconcile.Request {
 	var parents []gwv1.ParentReference
 	var status *gwv1.RouteStatus
 	switch rt := obj.(type) {
@@ -119,6 +121,29 @@ func (r *GatewayReconciler) gatewaysForRoute(_ context.Context, obj client.Objec
 	seen := map[types.NamespacedName]bool{}
 	var out []reconcile.Request
 	for _, p := range parents {
+		if key, ok := listenerSetParentRef(p, obj.GetNamespace()); ok {
+			// A ListenerSet that is gone leaves stale status, which any
+			// Gateway's reconcile removes.
+			if !r.Features.ListenerSet() {
+				continue
+			}
+			ls := &gwv1.ListenerSet{}
+			var reqs []reconcile.Request
+			if err := r.Get(ctx, key, ls); err == nil {
+				reqs = r.gatewayForListenerSet(ctx, ls)
+			} else if apierrors.IsNotFound(err) {
+				if all := r.managedGateways(ctx); len(all) > 0 {
+					reqs = all[:1]
+				}
+			}
+			for _, req := range reqs {
+				if !seen[req.NamespacedName] {
+					seen[req.NamespacedName] = true
+					out = append(out, req)
+				}
+			}
+			continue
+		}
 		if p.Group != nil && string(*p.Group) != gwv1.GroupName || p.Kind != nil && string(*p.Kind) != translate.KindGateway {
 			continue
 		}
@@ -191,6 +216,13 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager, fw *FeatureWatche
 	if r.Features.ReferenceGrant() {
 		b = b.Watches(&gwv1.ReferenceGrant{}, all)
 	}
+	// Old and new parents are both enqueued on update. Status writes do
+	// not change the generation and are skipped.
+	setHandler := handler.EnqueueRequestsFromMapFunc(r.gatewayForListenerSet)
+	setPredicate := predicate.GenerationChangedPredicate{}
+	if r.Features.ListenerSet() {
+		b = b.Watches(&gwv1.ListenerSet{}, setHandler, builder.WithPredicates(setPredicate))
+	}
 	c, err := b.Build(r)
 	if err != nil {
 		return err
@@ -216,6 +248,11 @@ func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager, fw *FeatureWatche
 	}
 	if !r.Features.ReferenceGrant() {
 		fw.OnReferenceGrant(watch(&gwv1.ReferenceGrant{}, all))
+	}
+	if !r.Features.ListenerSet() {
+		fw.OnListenerSet(func() error {
+			return c.Watch(source.Kind(mgr.GetCache(), client.Object(&gwv1.ListenerSet{}), setHandler, setPredicate))
+		})
 	}
 	return nil
 }
